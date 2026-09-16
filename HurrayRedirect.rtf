@@ -1,0 +1,63 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2870
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fmodern\fcharset0 Courier;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;}
+{\*\expandedcolortbl;;\cssrgb\c0\c0\c0;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\deftab720
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs26 \cf0 \expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 using System;\
+using System.Runtime.InteropServices;\
+using kCura.EventHandler;\
+using kCura.EventHandler.CustomAttributes;\
+\
+namespace Hurray2.EventHandlers\
+\{\
+    // Generate a unique GUID for your event handler class\
+    [Guid("A7B2E3D4-5C6D-4E8F-9A0B-1C2D3E4F5A6B")]\
+    [Description("Post Save Event Handler to redirect user to the Custom Page")]\
+    public class RedirectToCustomPagePostSaveEventHandler : PostSaveEventHandler\
+    \{\
+        private const string CustomPageGuid = "c495254a-78c8-4d0a-852c-d13f3f61dfc5";\
+\
+        public override Response Execute()\
+        \{\
+            var response = new Response\
+            \{\
+                Success = true,\
+                Message = string.Empty\
+            \};\
+\
+            try\
+            \{\
+                // %applicationPath% expands to the Relativity application root (e.g., /Relativity)\
+                // Appending query parameters (WorkspaceID / ArtifactID) allows the custom page to know which record was saved\
+                int workspaceId = Helper.GetActiveCaseID();\
+                int currentArtifactId = ActiveArtifact.ArtifactID;\
+\
+                string targetUrl = $"%applicationPath%/CustomPages/\{CustomPageGuid\}/Default.aspx?AppID=\{workspaceId\}&ArtifactID=\{currentArtifactId\}";\
+\
+                // Setting NavigationUrl instructs Relativity to redirect the user after save\
+                response.NavigationUrl = targetUrl;\
+            \}\
+            catch (Exception ex)\
+            \{\
+                response.Success = false;\
+                response.Message = $"Error preparing redirect to custom page: \{ex.Message\}";\
+            \}\
+\
+            return response;\
+        \}\
+\
+        public override FieldCollection RequiredFields\
+        \{\
+            get\
+            \{\
+                // Return an empty collection if no specific fields are required to run this handler\
+                return new FieldCollection();\
+            \}\
+        \}\
+    \}\
+\}\
+}
