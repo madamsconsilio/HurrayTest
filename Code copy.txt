@@ -9,32 +9,248 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Web.UI;
 using System.Web.UI.WebControls;
-
 namespace Hurray2
 {
-    public partial class Default : Page
+public partial class Default : Page
+{
+// Alternate way to get workspaceID
+private int WorkspaceArtifactId => ConnectionHelper.Helper().GetActiveCaseID();
+    protected void Page_Load(object sender, EventArgs e)
     {
-        // Alternate way to get workspaceID
-        private int WorkspaceArtifactId => ConnectionHelper.Helper().GetActiveCaseID();
+        // Gets the user ID.
+        int userArtifactId = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.ArtifactID;
+        // Gets the email address of the current user.
+        string userEmailAddress = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.EmailAddress;
+        // Gets the first name of the current user.
+        string firstName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.FirstName;
+        // Gets the last name of the current user.
+        string lastName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.LastName;
+        // Gets the full name of the current user.
+        string fullName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.FullName;
+        // Gets the current user workspace artifact ID.
+        int currentUserWorkspaceArtifactId = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.WorkspaceUserArtifactID;
 
-        protected void Page_Load(object sender, EventArgs e)
+        string displayString = String.Format("User: {0}\r\nUser ID: {1}\r\nUser Email: {2}\r\n\r\n Hello {3}, the time is {4}.", fullName, userArtifactId, userEmailAddress, firstName, DateTime.Now.ToShortTimeString());
+        string v = $"Active Workspace ID: { WorkspaceArtifactId}" + displayString;
+
+        if (!IsPostBack)
         {
-            // Gets the user ID.
-            int userArtifactId = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.ArtifactID;
-            // Gets the email address of the current user.
-            string userEmailAddress = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.EmailAddress;
-            // Gets the first name of the current user.
-            string firstName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.FirstName;
-            // Gets the last name of the current user.
-            string lastName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.LastName;
-            // Gets the full name of the current user.
-            string fullName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.FullName;
-            // Gets the current user workspace artifact ID.
-            int currentUserWorkspaceArtifactId = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.WorkspaceUserArtifactID;
+            DisplayLabel.Text = v;
 
-            string displayString = String.Format("User: {0}\r\nUser ID: {1}\r\nUser Email: {2}\r\n\r\n Hello {3}, the time is {4}.", fullName, userArtifactId, userEmailAddress, firstName, DateTime.Now.ToShortTimeString());
-            string v = $"Active Workspace ID: { WorkspaceArtifactId}" + displayString;
+            RegisterAsyncTask(new PageAsyncTask(PopulateFolderDropdownAsync));
+            // New
+            RegisterAsyncTask(new PageAsyncTask(PopulatePrivFieldsDropdownAsync));
+            // NEW
+            RegisterAsyncTask(new PageAsyncTask(PopulateHurrayProjectsDropdownAsync));
+        }
+    }
 
+    // BUTTON CLICK HANDLER
+    protected void btnGetControlNumbers_Click(object sender, EventArgs e)
+    {
+        RegisterAsyncTask(new PageAsyncTask(DisplayTop10ControlNumbersAsync));
+    }
+
+    private async Task DisplayTop10ControlNumbersAsync()
+    {
+        IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
+
+        using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
+        {
+            var queryRequest = new QueryRequest
+            {
+                ObjectType = new ObjectTypeRef { ArtifactTypeID = 10 }, // 10 = Document
+                Fields = new List<FieldRef>
+                {
+                    new FieldRef { Name = "Control Number" }
+                },
+                Sorts = new List<Sort>
+                {
+                    new Sort
+                    {
+                        Direction = SortEnum.Ascending,
+                        FieldIdentifier = new FieldRef { Name = "Control Number" }
+                    }
+                }
+            };
+
+            // Query for the top 10 documents (start index: 1, length: 10)
+            QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 10);
+
+            if (result?.Objects != null && result.Objects.Count > 0)
+            {
+                List<string> controlNumbers = new List<string>();
+
+                foreach (RelativityObject doc in result.Objects)
+                {
+                    string controlNumber = doc.FieldValues?
+                        .FirstOrDefault(f => f.Field.Name == "Control Number")?.Value?.ToString()
+                        ?? doc.Name;
+
+                    controlNumbers.Add(controlNumber);
+                }
+
+                lblControlNumbers.Text = string.Join("<br/>", controlNumbers);
+            }
+            else
+            {
+                lblControlNumbers.Text = "No documents found.";
+            }
+        }
+    }
+
+    // FOLDER DROPDOWN
+    private async System.Threading.Tasks.Task PopulateFolderDropdownAsync()
+    {
+        ddlDynamicOptions.Items.Clear();
+        ddlDynamicOptions.Items.Add(new ListItem("-- Select a Folder --", ""));
+
+        IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
+
+        using (IFolderManager folderManager = servicesMgr.CreateProxy<IFolderManager>(ExecutionIdentity.CurrentUser))
+        {
+            List<Folder> rootfolders = await folderManager.GetFolderTreeAsync(WorkspaceArtifactId, new List<int>());
+            if (rootfolders != null)
+            {
+                foreach (Folder rootFolder in rootfolders)
+                {
+                    AddFolderToDropDownList(rootFolder, level: 0);
+                }
+            }
+        }
+    }
+
+    private void AddFolderToDropDownList(Folder currentFolder, int level)
+    {
+        string indent = level == 0 ? string.Empty : new string('\u00A0', level * 4) + "└─ ";
+        var item = new ListItem
+        {
+            Text = $"{indent}{currentFolder.Name}",
+            Value = currentFolder.ArtifactID.ToString()
+        };
+
+        ddlDynamicOptions.Items.Add(item);
+
+        if (currentFolder.Children != null && currentFolder.Children.Count > 0)
+        {
+            foreach (Folder child in currentFolder.Children)
+            {
+                AddFolderToDropDownList(child, level + 1);
+            }
+        }
+    }
+    // END FOLDER DROPDOWN
+
+    // NEW
+    // FIELDS DROP DOWN
+    private async Task PopulatePrivFieldsDropdownAsync()
+    {
+        ddlFields.Items.Clear();
+        ddlFields.Items.Add(new ListItem("-- Select a PRIV Field --", ""));
+
+        IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
+
+        using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
+        {
+            var queryRequest = new QueryRequest
+            {
+                ObjectType = new ObjectTypeRef { ArtifactTypeID = 14 }, // 14 = Field
+                Condition = "'Object Type Artifact Type ID' == 10 AND 'Name' LIKE 'PRIV'",
+                Fields = new List<FieldRef>
+                {
+                    new FieldRef { Name = "Name" }
+                },
+                Sorts = new List<Sort>
+                {
+                    new Sort
+                    {
+                        Direction = SortEnum.Ascending,
+                        FieldIdentifier = new FieldRef { Name = "Name" }
+                    }
+                }
+            };
+
+            QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 1000);
+
+            if (result != null && result.Objects != null)
+            {
+                foreach (RelativityObject fieldObj in result.Objects)
+                {
+                    // Safely read "Name" from FieldValues or fallback to fieldObj.Name
+                    string fieldName = fieldObj.FieldValues?.Find(f => f.Field.Name == "Name")?.Value?.ToString();
+
+                    if (string.IsNullOrEmpty(fieldName))
+                    {
+                        fieldName = !string.IsNullOrEmpty(fieldObj.Name)
+                            ? fieldObj.Name
+                            : $"Field {fieldObj.ArtifactID}";
+                    }
+
+                    string fieldArtifactId = fieldObj.ArtifactID.ToString();
+
+                    // ListItem constructor: ListItem(Text, Value)
+                    ddlFields.Items.Add(new ListItem(fieldName, fieldArtifactId));
+                }
+            }
+        }
+    }
+    // END FIELDS DROPDOWN
+    // HURRAY PROJECTS DROPDOWN
+    private async Task PopulateHurrayProjectsDropdownAsync()
+    {
+        ddlHurrayProjects.Items.Clear();
+        ddlHurrayProjects.Items.Add(new ListItem("-- Select a Hurray Project --", ""));
+
+        IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
+
+        using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
+        {
+            var queryRequest = new QueryRequest
+            {
+                // Query the "Hurray" object type (can also use Guid or ArtifactTypeID if preferred)
+                ObjectType = new ObjectTypeRef { Name = "Hurray" },
+                Fields = new List<FieldRef>
+        {
+            // Field storing the project name (adjust field name if your field is named differently, e.g., "Name")
+            new FieldRef { Name = "Project Name" }
+        },
+                Sorts = new List<Sort>
+        {
+            new Sort
+            {
+                Direction = SortEnum.Ascending,
+                FieldIdentifier = new FieldRef { Name = "Project Name" }
+            }
+        }
+            };
+
+            QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 1000);
+
+            if (result?.Objects != null && result.Objects.Count > 0)
+            {
+                foreach (RelativityObject projectObj in result.Objects)
+                {
+                    // Retrieve "Project Name" from FieldValues, fallback to projectObj.Name
+                    string projectName = projectObj.FieldValues?
+                        .FirstOrDefault(f => f.Field.Name == "Project Name")?.Value?.ToString();
+
+                    if (string.IsNullOrWhiteSpace(projectName))
+                    {
+                        projectName = !string.IsNullOrWhiteSpace(projectObj.Name)
+                            ? projectObj.Name
+                            : $"Project {projectObj.ArtifactID}";
+                    }
+
+                    string artifactId = projectObj.ArtifactID.ToString();
+
+                    // ListItem(Text, Value) -> Text: Project Name, Value: ArtifactID
+                    ddlHurrayProjects.Items.Add(new ListItem(projectName, artifactId));
+                }
+            }
+        }
+    }
+    // END HURRAY PROJECTS DROPDOWN
+}
             if (!IsPostBack)
             {
                 DisplayLabel.Text = v;
