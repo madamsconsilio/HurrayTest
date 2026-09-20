@@ -1,91 +1,106 @@
-ASPX Markup Additions (for your .aspx file)
-
-Make sure you have added the DropDownList to your markup:
-
-<asp:DropDownList ID="ddlProjects" runat="server"></asp:DropDownList>
-
-
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Net;
-using System.Text;
-using System.Threading.Tasks;
-using System.Web.Script.Serialization;
-using System.Web.UI;
-using System.Web.UI.WebControls;
 using Relativity.API;
 using Relativity.CustomPages;
 using Relativity.Services.Folder;
 using Relativity.Services.Objects;
 using Relativity.Services.Objects.DataContracts;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Web.UI;
+using System.Web.UI.WebControls;
 
-namespace Huzzah
+namespace Hurray2
 {
     public partial class Default : Page
     {
-        private int WorkspaceArtifactId
-        {
-            get
-            {
-                try
-                {
-                    int caseId = ConnectionHelper.Helper().GetActiveCaseID();
-                    if (caseId > 0) return caseId;
-                }
-                catch { }
-
-                // Fallback to query string parameter (?AppID=123456)
-                if (int.TryParse(Request.QueryString["AppID"], out int qId))
-                {
-                    return qId;
-                }
-                return -1;
-            }
-        }
+        // Alternate way to get workspaceID
+        private int WorkspaceArtifactId => ConnectionHelper.Helper().GetActiveCaseID();
 
         protected void Page_Load(object sender, EventArgs e)
         {
+            // Gets the user ID.
+            int userArtifactId = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.ArtifactID;
+            // Gets the email address of the current user.
+            string userEmailAddress = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.EmailAddress;
+            // Gets the first name of the current user.
+            string firstName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.FirstName;
+            // Gets the last name of the current user.
+            string lastName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.LastName;
+            // Gets the full name of the current user.
+            string fullName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.FullName;
+            // Gets the current user workspace artifact ID.
+            int currentUserWorkspaceArtifactId = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.WorkspaceUserArtifactID;
+
+            string displayString = String.Format("User: {0}\r\nUser ID: {1}\r\nUser Email: {2}\r\n\r\n Hello {3}, the time is {4}.", fullName, userArtifactId, userEmailAddress, firstName, DateTime.Now.ToShortTimeString());
+            string v = $"Active Workspace ID: { WorkspaceArtifactId}" + displayString;
+
             if (!IsPostBack)
             {
-                try
+                DisplayLabel.Text = v;
+
+                RegisterAsyncTask(new PageAsyncTask(PopulateFolderDropdownAsync));
+                // New
+                RegisterAsyncTask(new PageAsyncTask(PopulatePrivFieldsDropdownAsync));
+            }
+        }
+
+        // BUTTON CLICK HANDLER
+        protected void btnGetControlNumbers_Click(object sender, EventArgs e)
+        {
+            RegisterAsyncTask(new PageAsyncTask(DisplayTop10ControlNumbersAsync));
+        }
+
+        private async Task DisplayTop10ControlNumbersAsync()
+        {
+            IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
+
+            using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
+            {
+                var queryRequest = new QueryRequest
                 {
-                    if (WorkspaceArtifactId <= 0)
+                    ObjectType = new ObjectTypeRef { ArtifactTypeID = 10 }, // 10 = Document
+                    Fields = new List<FieldRef>
                     {
-                        DisplayLabel.Text = "Error: Unable to identify active workspace ID. Please pass ?AppID=<WorkspaceID> in URL.";
-                        DisplayLabel.ForeColor = System.Drawing.Color.Red;
-                        return;
+                        new FieldRef { Name = "Control Number" }
+                    },
+                    Sorts = new List<Sort>
+                    {
+                        new Sort
+                        {
+                            Direction = SortEnum.Ascending,
+                            FieldIdentifier = new FieldRef { Name = "Control Number" }
+                        }
+                    }
+                };
+
+                // Query for the top 10 documents (start index: 1, length: 10)
+                QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 10);
+
+                if (result?.Objects != null && result.Objects.Count > 0)
+                {
+                    List<string> controlNumbers = new List<string>();
+
+                    foreach (RelativityObject doc in result.Objects)
+                    {
+                        string controlNumber = doc.FieldValues?
+                            .FirstOrDefault(f => f.Field.Name == "Control Number")?.Value?.ToString()
+                            ?? doc.Name;
+
+                        controlNumbers.Add(controlNumber);
                     }
 
-                    DisplayLabel.Text = $"Active Workspace ID: {WorkspaceArtifactId}";
-                    RegisterAsyncTask(new PageAsyncTask(PopulateDropdownsAsync));
+                    lblControlNumbers.Text = string.Join("<br/>", controlNumbers);
                 }
-                catch (Exception ex)
+                else
                 {
-                    ShowError("Page_Load Error: " + ex.ToString());
+                    lblControlNumbers.Text = "No documents found.";
                 }
             }
         }
 
-        private async Task PopulateDropdownsAsync()
-        {
-            try
-            {
-                await PopulateFolderDropdownAsync();
-                await PopulatePrivFieldsDropdownAsync();
-                await PopulateProjectsDropdownAsync();
-            }
-            catch (Exception ex)
-            {
-                ShowError("PopulateDropdowns Error: " + ex.ToString());
-            }
-        }
-
-        #region Populate Folder Dropdown
-
-        private async Task PopulateFolderDropdownAsync()
+        // FOLDER DROPDOWN
+        private async System.Threading.Tasks.Task PopulateFolderDropdownAsync()
         {
             ddlDynamicOptions.Items.Clear();
             ddlDynamicOptions.Items.Add(new ListItem("-- Select a Folder --", ""));
@@ -94,11 +109,10 @@ namespace Huzzah
 
             using (IFolderManager folderManager = servicesMgr.CreateProxy<IFolderManager>(ExecutionIdentity.CurrentUser))
             {
-                List<Folder> rootFolders = await folderManager.GetFolderTreeAsync(WorkspaceArtifactId, new List<int>());
-
-                if (rootFolders != null)
+                List<Folder> rootfolders = await folderManager.GetFolderTreeAsync(WorkspaceArtifactId, new List<int>());
+                if (rootfolders != null)
                 {
-                    foreach (Folder rootFolder in rootFolders)
+                    foreach (Folder rootFolder in rootfolders)
                     {
                         AddFolderToDropDownList(rootFolder, level: 0);
                     }
@@ -108,8 +122,7 @@ namespace Huzzah
 
         private void AddFolderToDropDownList(Folder currentFolder, int level)
         {
-            string indent = level == 0 ? string.Empty : new string('\u00A0', level * 4) + "\u2514\u2500 ";
-
+            string indent = level == 0 ? string.Empty : new string('\u00A0', level * 4) + "└─ ";
             var item = new ListItem
             {
                 Text = $"{indent}{currentFolder.Name}",
@@ -126,11 +139,10 @@ namespace Huzzah
                 }
             }
         }
+        // END FOLDER DROPDOWN
 
-        #endregion
-
-        #region Populate PRIV Field Dropdown
-
+        // NEW
+        // FIELDS DROP DOWN
         private async Task PopulatePrivFieldsDropdownAsync()
         {
             ddlFields.Items.Clear();
@@ -164,6 +176,7 @@ namespace Huzzah
                 {
                     foreach (RelativityObject fieldObj in result.Objects)
                     {
+                        // Safely read "Name" from FieldValues or fallback to fieldObj.Name
                         string fieldName = fieldObj.FieldValues?.Find(f => f.Field.Name == "Name")?.Value?.ToString();
 
                         if (string.IsNullOrEmpty(fieldName))
@@ -174,344 +187,13 @@ namespace Huzzah
                         }
 
                         string fieldArtifactId = fieldObj.ArtifactID.ToString();
+
+                        // ListItem constructor: ListItem(Text, Value)
                         ddlFields.Items.Add(new ListItem(fieldName, fieldArtifactId));
                     }
                 }
             }
         }
-
-        #endregion
-
-        #region Populate Projects Dropdown (Hurray Object)
-
-        private async Task PopulateProjectsDropdownAsync()
-        {
-            ddlProjects.Items.Clear();
-            ddlProjects.Items.Add(new ListItem("-- Select a Project --", ""));
-
-            IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
-
-            using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
-            {
-                var queryRequest = new QueryRequest
-                {
-                    ObjectType = new ObjectTypeRef { Name = "Hurray" },
-                    Fields = new List<FieldRef>
-                    {
-                        new FieldRef { Name = "Name" }
-                    },
-                    Sorts = new List<Sort>
-                    {
-                        new Sort
-                        {
-                            Direction = SortEnum.Ascending,
-                            FieldIdentifier = new FieldRef { Name = "Name" }
-                        }
-                    }
-                };
-
-                QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 1000);
-
-                if (result != null && result.Objects != null)
-                {
-                    foreach (RelativityObject projectObj in result.Objects)
-                    {
-                        // Check explicit Name field value, then fallback to projectObj.Name
-                        string projectName = projectObj.FieldValues?.Find(f => f.Field.Name == "Name")?.Value?.ToString();
-                        if (string.IsNullOrEmpty(projectName))
-                        {
-                            projectName = !string.IsNullOrEmpty(projectObj.Name)
-                                ? projectObj.Name
-                                : $"Project {projectObj.ArtifactID}";
-                        }
-
-                        ddlProjects.Items.Add(new ListItem(projectName, projectObj.ArtifactID.ToString()));
-                    }
-                }
-            }
-        }
-
-        #endregion
-
-        #region Run Claude / Floodgate Workflow
-
-        protected void btnRunClaude_Click(object sender, EventArgs e)
-        {
-            RegisterAsyncTask(new PageAsyncTask(ExecuteClaudeWorkflowAsync));
-        }
-
-        private async Task ExecuteClaudeWorkflowAsync()
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(ddlDynamicOptions.SelectedValue) || 
-                    string.IsNullOrEmpty(ddlFields.SelectedValue) || 
-                    string.IsNullOrEmpty(ddlProjects.SelectedValue))
-                {
-                    lblStatus.Text = "Please select a Project, Folder, and Target Field.";
-                    lblStatus.ForeColor = System.Drawing.Color.Red;
-                    return;
-                }
-
-                int selectedFolderId = int.Parse(ddlDynamicOptions.SelectedValue);
-                int selectedFieldArtifactId = int.Parse(ddlFields.SelectedValue);
-                int selectedProjectId = int.Parse(ddlProjects.SelectedValue);
-                string selectedProjectName = ddlProjects.SelectedItem.Text;
-                string userPrompt = txtUserPrompt.Text;
-
-                lblStatus.Text = $"Querying documents for Project '{selectedProjectName}' and authenticating to Floodgate...";
-                lblStatus.ForeColor = System.Drawing.Color.Blue;
-
-                IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
-
-                using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
-                {
-                    var docQuery = new QueryRequest
-                    {
-                        ObjectType = new ObjectTypeRef { ArtifactTypeID = 10 },
-                        Condition = $"'Folder' == OBJECT {selectedFolderId}",
-                        Fields = new List<FieldRef>
-                        {
-                            new FieldRef { Name = "Control Number" },
-                            new FieldRef { Name = "Extracted Text" }
-                        }
-                    };
-
-                    QueryResult docResults = await objectManager.QueryAsync(WorkspaceArtifactId, docQuery, 1, 5);
-
-                    if (docResults == null || !docResults.Objects.Any())
-                    {
-                        lblStatus.Text = "No documents found in the selected folder.";
-                        lblStatus.ForeColor = System.Drawing.Color.Orange;
-                        return;
-                    }
-
-                    var floodgateClient = new FloodgateClient();
-                    var logs = new StringBuilder();
-
-                    foreach (RelativityObject doc in docResults.Objects)
-                    {
-                        string controlNum = doc.FieldValues.Find(f => f.Field.Name == "Control Number")?.Value?.ToString() ?? doc.ArtifactID.ToString();
-                        string extractedText = doc.FieldValues.Find(f => f.Field.Name == "Extracted Text")?.Value?.ToString() ?? string.Empty;
-
-                        if (extractedText.Length > 8000)
-                        {
-                            extractedText = extractedText.Substring(0, 8000) + "... [truncated]";
-                        }
-
-                        string response = await floodgateClient.CallClaudeAsync(userPrompt, extractedText);
-                        logs.AppendLine($"[{controlNum}] -> Privilege Analysis:\n{response}\n");
-
-                        var updateRequest = new UpdateRequest
-                        {
-                            Object = new RelativityObjectRef { ArtifactID = doc.ArtifactID },
-                            FieldValues = new List<FieldRefValuePair>
-                            {
-                                new FieldRefValuePair
-                                {
-                                    Field = new FieldRef { ArtifactID = selectedFieldArtifactId },
-                                    Value = response
-                                }
-                            }
-                        };
-
-                        await objectManager.UpdateAsync(WorkspaceArtifactId, updateRequest);
-                    }
-
-                    lblStatus.Text = $"Successfully processed {docResults.Objects.Count} document(s) for Project '{selectedProjectName}'.";
-                    lblStatus.ForeColor = System.Drawing.Color.Green;
-                    litClaudeResponse.Text = logs.ToString();
-                    divOutput.Visible = true;
-                }
-            }
-            catch (Exception ex)
-            {
-                ShowError("Execution Error: " + ex.ToString());
-            }
-        }
-
-        #endregion
-
-        private void ShowError(string message)
-        {
-            lblStatus.Text = "An error occurred:";
-            lblStatus.ForeColor = System.Drawing.Color.Red;
-            litClaudeResponse.Text = message;
-            divOutput.Visible = true;
-        }
+        // END FIELDS DROPDOWN
     }
-
-    #region Floodgate Client & Token Acquisition
-
-    public class FloodgateClient
-    {
-        private const string FloodgateUrl = "https://floodgate.g.apple.com/api/anthropic/v1/messages";
-        private const string ClientId = "hvys3fcwcteqrvw3qzkvtk86viuoqv";
-        private const string Scopes = "openid,dsid,accountname,email,groups";
-
-        private static string _cachedToken;
-        private static DateTime _tokenExpiration = DateTime.MinValue;
-        private static readonly JavaScriptSerializer _serializer = new JavaScriptSerializer();
-
-        public static string GetAppleConnectToken()
-        {
-            if (!string.IsNullOrEmpty(_cachedToken) && DateTime.UtcNow < _tokenExpiration)
-            {
-                return _cachedToken;
-            }
-
-            string appleconnectPath = "/usr/local/bin/appleconnect";
-            if (!File.Exists(appleconnectPath))
-            {
-                appleconnectPath = "/opt/homebrew/bin/appleconnect";
-            }
-
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = appleconnectPath,
-                Arguments = $"getToken -t oauth -G pkce -C {ClientId} -o {Scopes} --interactivity-type none",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using (var process = Process.Start(startInfo))
-            {
-                if (process == null)
-                {
-                    throw new Exception("Failed to launch appleconnect process.");
-                }
-
-                string output = process.StandardOutput.ReadToEnd();
-                string error = process.StandardError.ReadToEnd();
-                process.WaitForExit();
-
-                if (process.ExitCode != 0)
-                {
-                    throw new Exception($"appleconnect failed (exit code {process.ExitCode}): {error}");
-                }
-
-                using (var reader = new StringReader(output))
-                {
-                    string line;
-                    while ((line = reader.ReadLine()) != null)
-                    {
-                        if (line.StartsWith("id-token"))
-                        {
-                            string[] parts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                            if (parts.Length >= 2)
-                            {
-                                _cachedToken = parts[1].Trim();
-                                _tokenExpiration = DateTime.UtcNow.AddMinutes(45);
-                                return _cachedToken;
-                            }
-                        }
-                    }
-                }
-
-                throw new Exception($"Could not extract id-token from appleconnect output:\n{output}");
-            }
-        }
-
-        public async Task<string> CallClaudeAsync(string userPrompt, string documentText, string model = "anthropic.claude-sonnet-4-6")
-        {
-            string token = GetAppleConnectToken();
-
-            var requestPayload = new ClaudeRequest
-            {
-                model = model,
-                max_tokens = 1024,
-                messages = new List<ClaudeMessage>
-                {
-                    new ClaudeMessage
-                    {
-                        role = "user",
-                        content = $"{userPrompt}\n\n--- DOCUMENT TEXT ---\n{documentText}"
-                    }
-                }
-            };
-
-            string jsonPayload = _serializer.Serialize(requestPayload);
-            byte[] byteArray = Encoding.UTF8.GetBytes(jsonPayload);
-
-            var request = (HttpWebRequest)WebRequest.Create(FloodgateUrl);
-            request.Method = "POST";
-            request.ContentType = "application/json";
-            request.UserAgent = "HurrayCustomPage/1.0";
-            request.Headers.Add("Authorization", $"Bearer {token}");
-            request.ContentLength = byteArray.Length;
-
-            using (var dataStream = await request.GetRequestStreamAsync())
-            {
-                await dataStream.WriteAsync(byteArray, 0, byteArray.Length);
-            }
-
-            try
-            {
-                using (var response = (HttpWebResponse)await request.GetResponseAsync())
-                using (var streamReader = new StreamReader(response.GetResponseStream()))
-                {
-                    string responseBody = await streamReader.ReadToEndAsync();
-                    var result = _serializer.Deserialize<ClaudeResponse>(responseBody);
-                    return (result != null && result.content != null && result.content.Count > 0)
-                        ? result.content[0].text
-                        : string.Empty;
-                }
-            }
-            catch (WebException webEx)
-            {
-                if (webEx.Response is HttpWebResponse errorResponse)
-                {
-                    if (errorResponse.StatusCode == HttpStatusCode.Unauthorized)
-                    {
-                        _cachedToken = null;
-                    }
-                    using (var reader = new StreamReader(errorResponse.GetResponseStream()))
-                    {
-                        string errorText = await reader.ReadToEndAsync();
-                        throw new Exception($"Floodgate API error ({errorResponse.StatusCode}): {errorText}");
-                    }
-                }
-                throw;
-            }
-        }
-    }
-
-    #endregion
-
-    #region Claude DTOs
-
-    public class ClaudeRequest
-    {
-        public string model { get; set; }
-        public int max_tokens { get; set; }
-        public List<ClaudeMessage> messages { get; set; }
-
-        public ClaudeRequest()
-        {
-            model = "anthropic.claude-sonnet-4-6";
-            max_tokens = 1024;
-            messages = new List<ClaudeMessage>();
-        }
-    }
-
-    public class ClaudeMessage
-    {
-        public string role { get; set; }
-        public string content { get; set; }
-    }
-
-    public class ClaudeResponse
-    {
-        public List<ClaudeContentBlock> content { get; set; }
-    }
-
-    public class ClaudeContentBlock
-    {
-        public string type { get; set; }
-        public string text { get; set; }
-    }
-
-    #endregion
 }
