@@ -1,3 +1,5 @@
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using Relativity.API;
 using Relativity.CustomPages;
 using Relativity.Services.Folder;
@@ -6,6 +8,8 @@ using Relativity.Services.Objects.DataContracts;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
+using System.Text;
 using System.Threading.Tasks;
 using System.Web.UI;
 using System.Web.UI.WebControls;
@@ -14,57 +18,66 @@ namespace Hurray2
 {
     public partial class Default : Page
     {
-        // Alternate way to get workspaceID
+        // Set your Anthropic API Key or retrieve it from an Instance Setting / Environment Variable
+        private static readonly string ClaudeApiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY") ?? "YOUR_ANTHROPIC_API_KEY";
+        private const string ClaudeModel = "claude-3-5-sonnet-20241022";
+
+        private static readonly HttpClient _httpClient = new HttpClient();
+
         private int WorkspaceArtifactId => ConnectionHelper.Helper().GetActiveCaseID();
 
         protected void Page_Load(object sender, EventArgs e)
         {
-            // Gets the user ID.
             int userArtifactId = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.ArtifactID;
-            // Gets the email address of the current user.
             string userEmailAddress = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.EmailAddress;
-            // Gets the first name of the current user.
             string firstName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.FirstName;
-            // Gets the last name of the current user.
             string lastName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.LastName;
-            // Gets the full name of the current user.
             string fullName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.FullName;
-            // Gets the current user workspace artifact ID.
             int currentUserWorkspaceArtifactId = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.WorkspaceUserArtifactID;
 
-            string displayString = String.Format("User: {0}\r\nUser ID: {1}\r\nUser Email: {2}\r\n\r\n Hello {3}, the time is {4}.", fullName, userArtifactId, userEmailAddress, firstName, DateTime.Now.ToShortTimeString());
-            string v = $"Active Workspace ID: { WorkspaceArtifactId}" + displayString;
+            string displayString = String.Format("User: {0}\r\nUser ID: {1}\r\nUser Email: {2}\r\n\r\n Hello {3}, the time is {4}.", 
+                fullName, userArtifactId, userEmailAddress, firstName, DateTime.Now.ToShortTimeString());
+            string v = $"Active Workspace ID: {WorkspaceArtifactId}\r\n" + displayString;
 
             if (!IsPostBack)
             {
                 DisplayLabel.Text = v;
 
                 RegisterAsyncTask(new PageAsyncTask(PopulateFolderDropdownAsync));
-                // New
                 RegisterAsyncTask(new PageAsyncTask(PopulatePrivFieldsDropdownAsync));
-                // NEW
                 RegisterAsyncTask(new PageAsyncTask(PopulateHurrayProjectsDropdownAsync));
             }
         }
 
-        // BUTTON CLICK HANDLER
+        // =========================================================================
+        // BUTTON CLICK HANDLER: Analyze documents via Claude API
+        // =========================================================================
         protected void btnGetControlNumbers_Click(object sender, EventArgs e)
         {
-            RegisterAsyncTask(new PageAsyncTask(DisplayTop10ControlNumbersAsync));
+            RegisterAsyncTask(new PageAsyncTask(ProcessAndAnalyzeDocumentsAsync));
         }
 
-        private async Task DisplayTop10ControlNumbersAsync()
+        private async Task ProcessAndAnalyzeDocumentsAsync()
         {
             IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
 
             using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
             {
+                // Optional: filter by selected folder if chosen
+                string condition = "";
+                if (!string.IsNullOrEmpty(ddlDynamicOptions.SelectedValue) && int.TryParse(ddlDynamicOptions.SelectedValue, out int folderId))
+                {
+                    condition = $"'Folder' == OBJECT {folderId}";
+                }
+
                 var queryRequest = new QueryRequest
                 {
                     ObjectType = new ObjectTypeRef { ArtifactTypeID = 10 }, // 10 = Document
+                    Condition = condition,
                     Fields = new List<FieldRef>
                     {
-                        new FieldRef { Name = "Control Number" }
+                        new FieldRef { Name = "Control Number" },
+                        new FieldRef { Name = "Extracted Text" }
                     },
                     Sorts = new List<Sort>
                     {
@@ -76,33 +89,160 @@ namespace Hurray2
                     }
                 };
 
-                // Query for the top 10 documents (start index: 1, length: 10)
+                // Query for top 10 documents
                 QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 10);
 
-                if (result?.Objects != null && result.Objects.Count > 0)
+                if (result?.Objects == null || result.Objects.Count == 0)
                 {
-                    List<string> controlNumbers = new List<string>();
+                    lblControlNumbers.Text = "No documents found to analyze.";
+                    return;
+                }
 
-                    foreach (RelativityObject doc in result.Objects)
+                string projectName = ddlHurrayProjects.SelectedItem != null && !string.IsNullOrEmpty(ddlHurrayProjects.SelectedValue)
+                    ? ddlHurrayProjects.SelectedItem.Text
+                    : "General Review";
+
+                List<string> displayResults = new List<string>();
+
+                foreach (RelativityObject doc in result.Objects)
+                {
+                    string controlNumber = doc.FieldValues?.FirstOrDefault(f => f.Field.Name == "Control Number")?.Value?.ToString() ?? doc.Name;
+                    string extractedText = doc.FieldValues?.FirstOrDefault(f => f.Field.Name == "Extracted Text")?.Value?.ToString() ?? string.Empty;
+
+                    // Truncate to avoid exceeding token limits (Hurray standard: 30,000 characters)
+                    if (extractedText.Length > 30000)
                     {
-                        string controlNumber = doc.FieldValues?
-                            .FirstOrDefault(f => f.Field.Name == "Control Number")?.Value?.ToString()
-                            ?? doc.Name;
-
-                        controlNumbers.Add(controlNumber);
+                        extractedText = extractedText.Substring(0, 30000);
                     }
 
-                    lblControlNumbers.Text = string.Join("<br/>", controlNumbers);
+                    try
+                    {
+                        // Call Claude API for document analysis
+                        JObject analysisResult = await CallClaudeForPrivilegeAnalysisAsync(controlNumber, extractedText, projectName);
+
+                        string status = analysisResult["status"]?.ToString() ?? "Unknown";
+                        string rationale = analysisResult["rationale"]?.ToString() ?? "";
+                        string narrative = analysisResult["privilege_log_narrative"]?.ToString() ?? "";
+
+                        displayResults.Add($"<b>{controlNumber}</b>: {status}<br/>" +
+                                           $"<i>Rationale:</i> {rationale}<br/>" +
+                                           (!string.IsNullOrEmpty(narrative) ? $"<i>Priv Log:</i> {narrative}<br/>" : "") +
+                                           "<hr/>");
+                    }
+                    catch (Exception ex)
+                    {
+                        displayResults.Add($"<b>{controlNumber}</b>: Error during analysis - {ex.Message}<hr/>");
+                    }
                 }
-                else
-                {
-                    lblControlNumbers.Text = "No documents found.";
-                }
+
+                lblControlNumbers.Text = string.Join("", displayResults);
             }
         }
 
-        // FOLDER DROPDOWN
-        private async System.Threading.Tasks.Task PopulateFolderDropdownAsync()
+        // =========================================================================
+        // CLAUDE API INTEGRATION (Hurray Tool-Calling Pattern)
+        // =========================================================================
+        private async Task<JObject> CallClaudeForPrivilegeAnalysisAsync(string controlNumber, string extractedText, string projectName)
+        {
+            // Hurray System Prompt definition
+            string systemPrompt = "You are an expert attorney performing second-pass privilege review on discovery documents. " +
+                                  "Analyze whether attorney-client privilege (ACP), work product (WP), or other protections apply. " +
+                                  "Determine privilege status, confidence score, rationale, flags, and generate privilege log entries. " +
+                                  $"Matter/Project Name: {projectName}";
+
+            string userPrompt = $"### Document Metadata\n- **Control Number:** {controlNumber}\n\n" +
+                                $"### Document Content\n```\n{extractedText}\n```";
+
+            // Payload structured matching Hurray's ClaudeRequest & record_privilege_analysis tool
+            var requestBody = new
+            {
+                model = ClaudeModel,
+                max_tokens = 2048,
+                system = new[]
+                {
+                    new { type = "text", text = systemPrompt }
+                },
+                tools = new[]
+                {
+                    new
+                    {
+                        name = "record_privilege_analysis",
+                        description = "Records the privilege determination, rationale, and privilege log entry for a document.",
+                        input_schema = new
+                        {
+                            type = "object",
+                            properties = new
+                            {
+                                status = new
+                                {
+                                    type = "string",
+                                    @enum = new[] { "Privileged", "Not Privileged", "Potentially Privileged" },
+                                    description = "Core privilege determination"
+                                },
+                                privilege_types = new
+                                {
+                                    type = "array",
+                                    items = new { type = "string", @enum = new[] { "ACP", "WP", "Common Interest", "Mediation Privilege" } }
+                                },
+                                redact_privilege_tag = new
+                                {
+                                    type = "string",
+                                    @enum = new[] { "Withhold", "Redaction Needed" }
+                                },
+                                confidence_score = new { type = "number", description = "0.0 to 1.0" },
+                                rationale = new { type = "string", description = "Detailed legal reasoning" },
+                                privilege_log_narrative = new { type = "string", description = "Privilege log prose description" }
+                            },
+                            required = new[] { "status", "rationale" }
+                        }
+                    }
+                },
+                tool_choice = new
+                {
+                    type = "tool",
+                    name = "record_privilege_analysis"
+                },
+                messages = new[]
+                {
+                    new { role = "user", content = userPrompt }
+                }
+            };
+
+            var requestMessage = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages");
+            requestMessage.Headers.Add("x-api-key", ClaudeApiKey);
+            requestMessage.Headers.Add("anthropic-version", "2023-06-01");
+            requestMessage.Content = new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json");
+
+            HttpResponseMessage response = await _httpClient.SendAsync(requestMessage);
+            string responseJson = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new Exception($"Claude API error ({response.StatusCode}): {responseJson}");
+            }
+
+            JObject parsedResponse = JObject.Parse(responseJson);
+
+            // Extract input parameters from the record_privilege_analysis tool_use block
+            JToken toolUseBlock = parsedResponse["content"]?.FirstOrDefault(b => b["type"]?.ToString() == "tool_use");
+
+            if (toolUseBlock != null && toolUseBlock["input"] is JObject inputObj)
+            {
+                return inputObj;
+            }
+
+            // Fallback if returned in raw text
+            return new JObject
+            {
+                ["status"] = "Completed",
+                ["rationale"] = parsedResponse["content"]?.FirstOrDefault(b => b["type"]?.ToString() == "text")?["text"]?.ToString() ?? "No output returned"
+            };
+        }
+
+        // =========================================================================
+        // DROPDOWN POPULATION METHODS
+        // =========================================================================
+        private async Task PopulateFolderDropdownAsync()
         {
             ddlDynamicOptions.Items.Clear();
             ddlDynamicOptions.Items.Add(new ListItem("-- Select a Folder --", ""));
@@ -141,10 +281,7 @@ namespace Hurray2
                 }
             }
         }
-        // END FOLDER DROPDOWN
 
-        // NEW
-        // FIELDS DROP DOWN
         private async Task PopulatePrivFieldsDropdownAsync()
         {
             ddlFields.Items.Clear();
@@ -174,11 +311,10 @@ namespace Hurray2
 
                 QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 1000);
 
-                if (result != null && result.Objects != null)
+                if (result?.Objects != null)
                 {
                     foreach (RelativityObject fieldObj in result.Objects)
                     {
-                        // Safely read "Name" from FieldValues or fallback to fieldObj.Name
                         string fieldName = fieldObj.FieldValues?.Find(f => f.Field.Name == "Name")?.Value?.ToString();
 
                         if (string.IsNullOrEmpty(fieldName))
@@ -189,15 +325,12 @@ namespace Hurray2
                         }
 
                         string fieldArtifactId = fieldObj.ArtifactID.ToString();
-
-                        // ListItem constructor: ListItem(Text, Value)
                         ddlFields.Items.Add(new ListItem(fieldName, fieldArtifactId));
                     }
                 }
             }
         }
-        // END FIELDS DROPDOWN
-        // HURRAY PROJECTS DROPDOWN
+
         private async Task PopulateHurrayProjectsDropdownAsync()
         {
             ddlHurrayProjects.Items.Clear();
@@ -209,21 +342,19 @@ namespace Hurray2
             {
                 var queryRequest = new QueryRequest
                 {
-                    // Query the "Hurray" object type (can also use Guid or ArtifactTypeID if preferred)
                     ObjectType = new ObjectTypeRef { Name = "Hurray" },
                     Fields = new List<FieldRef>
-            {
-                // Field storing the project name (adjust field name if your field is named differently, e.g., "Name")
-                new FieldRef { Name = "Project Name" }
-            },
+                    {
+                        new FieldRef { Name = "Project Name" }
+                    },
                     Sorts = new List<Sort>
-            {
-                new Sort
-                {
-                    Direction = SortEnum.Ascending,
-                    FieldIdentifier = new FieldRef { Name = "Project Name" }
-                }
-            }
+                    {
+                        new Sort
+                        {
+                            Direction = SortEnum.Ascending,
+                            FieldIdentifier = new FieldRef { Name = "Project Name" }
+                        }
+                    }
                 };
 
                 QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 1000);
@@ -232,7 +363,6 @@ namespace Hurray2
                 {
                     foreach (RelativityObject projectObj in result.Objects)
                     {
-                        // Retrieve "Project Name" from FieldValues, fallback to projectObj.Name
                         string projectName = projectObj.FieldValues?
                             .FirstOrDefault(f => f.Field.Name == "Project Name")?.Value?.ToString();
 
@@ -244,13 +374,10 @@ namespace Hurray2
                         }
 
                         string artifactId = projectObj.ArtifactID.ToString();
-
-                        // ListItem(Text, Value) -> Text: Project Name, Value: ArtifactID
                         ddlHurrayProjects.Items.Add(new ListItem(projectName, artifactId));
                     }
                 }
             }
         }
-        // END HURRAY PROJECTS DROPDOWN
     }
 }
