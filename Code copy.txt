@@ -1,3 +1,6 @@
+<asp:Button ID="btnGenerateToken" runat="server" Text="Generate Floodgate Token" OnClick="btnGenerateToken_Click" />
+<asp:Label ID="lblTokenStatus" runat="server" />
+
 using Relativity.API;
 using Relativity.CustomPages;
 using Relativity.Services.Folder;
@@ -6,6 +9,9 @@ using Relativity.Services.Objects.DataContracts;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text.Json; // Or Newtonsoft.Json
 using System.Threading.Tasks;
 using System.Web.UI;
 using System.Web.UI.WebControls;
@@ -17,19 +23,21 @@ namespace Hurray2
         // Alternate way to get workspaceID
         private int WorkspaceArtifactId => ConnectionHelper.Helper().GetActiveCaseID();
 
+        // -------------------------------------------------------------
+        // FLOODGATE CONFIGURATION (Adjust endpoints & credentials)
+        // -------------------------------------------------------------
+        private static readonly HttpClient _httpClient = new HttpClient();
+        private const string FloodgateTokenUrl = "https://floodgate.apple.com/oauth/token"; // Update with your Floodgate token URL
+        private const string ClientId = "YOUR_FLOODGATE_CLIENT_ID";
+        private const string ClientSecret = "YOUR_FLOODGATE_CLIENT_SECRET";
+
         protected void Page_Load(object sender, EventArgs e)
         {
-            // Gets the user ID.
             int userArtifactId = ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.ArtifactID;
-            // Gets the email address of the current user.
             string userEmailAddress = ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.EmailAddress;
-            // Gets the first name of the current user.
             string firstName = ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.FirstName;
-            // Gets the last name of the current user.
             string lastName = ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.LastName;
-            // Gets the full name of the current user.
             string fullName = ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.FullName;
-            // Gets the current user workspace artifact ID.
             int currentUserWorkspaceArtifactId = ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.WorkspaceUserArtifactID;
 
             string displayString = string.Format("User: {0}\r\nUser ID: {1}\r\nUser Email: {2}\r\n\r\n Hello {3}, the time is {4}.", fullName, userArtifactId, userEmailAddress, firstName, DateTime.Now.ToShortTimeString());
@@ -39,6 +47,279 @@ namespace Hurray2
             {
                 DisplayLabel.Text = v;
 
+                RegisterAsyncTask(new PageAsyncTask(PopulateFolderDropdownAsync));
+                RegisterAsyncTask(new PageAsyncTask(PopulatePrivFieldsDropdownAsync));
+                RegisterAsyncTask(new PageAsyncTask(PopulateHurrayProjectsDropdownAsync));
+            }
+        }
+
+        // -------------------------------------------------------------
+        // FLOODGATE TOKEN GENERATION
+        // -------------------------------------------------------------
+        protected void btnGenerateToken_Click(object sender, EventArgs e)
+        {
+            RegisterAsyncTask(new PageAsyncTask(HandleGenerateTokenAsync));
+        }
+
+        private async Task HandleGenerateTokenAsync()
+        {
+            try
+            {
+                string token = await GetFloodgateTokenAsync();
+                
+                // Store in session or viewstate if needed across requests
+                Session["FloodgateToken"] = token;
+
+                if (lblTokenStatus != null)
+                {
+                    lblTokenStatus.Text = $"Token generated successfully! (Length: {token.Length} chars)";
+                }
+            }
+            catch (Exception ex)
+            {
+                if (lblTokenStatus != null)
+                {
+                    lblTokenStatus.Text = $"<span style='color:red;'>Failed to retrieve Floodgate token: {ex.Message}</span>";
+                }
+            }
+        }
+
+        public async Task<string> GetFloodgateTokenAsync()
+        {
+            var requestBody = new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("grant_type", "client_credentials"),
+                new KeyValuePair<string, string>("client_id", ClientId),
+                new KeyValuePair<string, string>("client_secret", ClientSecret),
+                // Add "scope" or "resource" if your Floodgate profile requires it:
+                // new KeyValuePair<string, string>("scope", "read write")
+            });
+
+            using (var request = new HttpRequestMessage(HttpMethod.Post, FloodgateTokenUrl))
+            {
+                request.Content = requestBody;
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+                HttpResponseMessage response = await _httpClient.SendAsync(request);
+
+                string responseContent = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new HttpRequestException($"Floodgate returned status {response.StatusCode}: {responseContent}");
+                }
+
+                using (JsonDocument doc = JsonDocument.Parse(responseContent))
+                {
+                    if (doc.RootElement.TryGetProperty("access_token", out JsonElement tokenElement))
+                    {
+                        return tokenElement.GetString();
+                    }
+                    else if (doc.RootElement.TryGetProperty("token", out JsonElement altTokenElement))
+                    {
+                        return altTokenElement.GetString();
+                    }
+
+                    throw new InvalidOperationException("Response did not contain an 'access_token' property.");
+                }
+            }
+        }
+
+        // BUTTON CLICK HANDLER
+        protected void btnGetControlNumbers_Click(object sender, EventArgs e)
+        {
+            RegisterAsyncTask(new PageAsyncTask(DisplayTop10ControlNumbersAsync));
+        }
+
+        private async Task DisplayTop10ControlNumbersAsync()
+        {
+            IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
+
+            using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
+            {
+                var queryRequest = new QueryRequest
+                {
+                    ObjectType = new ObjectTypeRef { ArtifactTypeID = 10 }, // 10 = Document
+                    Fields = new List<FieldRef>
+                    {
+                        new FieldRef { Name = "Control Number" }
+                    },
+                    Sorts = new List<Sort>
+                    {
+                        new Sort
+                        {
+                            Direction = SortEnum.Ascending,
+                            FieldIdentifier = new FieldRef { Name = "Control Number" }
+                        }
+                    }
+                };
+
+                QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 10);
+
+                if (result?.Objects != null && result.Objects.Count > 0)
+                {
+                    List<string> controlNumbers = new List<string>();
+
+                    foreach (RelativityObject doc in result.Objects)
+                    {
+                        string controlNumber = doc.FieldValues?
+                            .FirstOrDefault(f => f.Field.Name == "Control Number")?.Value?.ToString()
+                            ?? doc.Name;
+
+                        controlNumbers.Add(controlNumber);
+                    }
+
+                    lblControlNumbers.Text = string.Join("<br/>", controlNumbers);
+                }
+                else
+                {
+                    lblControlNumbers.Text = "No documents found.";
+                }
+            }
+        }
+
+        // FOLDER DROPDOWN
+        private async Task PopulateFolderDropdownAsync()
+        {
+            ddlDynamicOptions.Items.Clear();
+            ddlDynamicOptions.Items.Add(new ListItem("-- Select a Folder --", ""));
+
+            IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
+
+            using (IFolderManager folderManager = servicesMgr.CreateProxy<IFolderManager>(ExecutionIdentity.CurrentUser))
+            {
+                List<Folder> rootfolders = await folderManager.GetFolderTreeAsync(WorkspaceArtifactId, new List<int>());
+                if (rootfolders != null)
+                {
+                    foreach (Folder rootFolder in rootfolders)
+                    {
+                        AddFolderToDropDownList(rootFolder, level: 0);
+                    }
+                }
+            }
+        }
+
+        private void AddFolderToDropDownList(Folder currentFolder, int level)
+        {
+            string indent = level == 0 ? string.Empty : new string('\u00A0', level * 4) + "└─ ";
+            var item = new ListItem
+            {
+                Text = $"{indent}{currentFolder.Name}",
+                Value = currentFolder.ArtifactID.ToString()
+            };
+
+            ddlDynamicOptions.Items.Add(item);
+
+            if (currentFolder.Children != null && currentFolder.Children.Count > 0)
+            {
+                foreach (Folder child in currentFolder.Children)
+                {
+                    AddFolderToDropDownList(child, level + 1);
+                }
+            }
+        }
+
+        // FIELDS DROP DOWN
+        private async Task PopulatePrivFieldsDropdownAsync()
+        {
+            ddlFields.Items.Clear();
+            ddlFields.Items.Add(new ListItem("-- Select a PRIV Field --", ""));
+
+            IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
+
+            using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
+            {
+                var queryRequest = new QueryRequest
+                {
+                    ObjectType = new ObjectTypeRef { ArtifactTypeID = 14 }, // 14 = Field
+                    Condition = "'Object Type Artifact Type ID' == 10 AND 'Name' LIKE 'PRIV'",
+                    Fields = new List<FieldRef>
+                    {
+                        new FieldRef { Name = "Name" }
+                    },
+                    Sorts = new List<Sort>
+                    {
+                        new Sort
+                        {
+                            Direction = SortEnum.Ascending,
+                            FieldIdentifier = new FieldRef { Name = "Name" }
+                        }
+                    }
+                };
+
+                QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 1000);
+
+                if (result?.Objects != null)
+                {
+                    foreach (RelativityObject fieldObj in result.Objects)
+                    {
+                        string fieldName = fieldObj.FieldValues?.Find(f => f.Field.Name == "Name")?.Value?.ToString();
+
+                        if (string.IsNullOrEmpty(fieldName))
+                        {
+                            fieldName = !string.IsNullOrEmpty(fieldObj.Name)
+                                ? fieldObj.Name
+                                : $"Field {fieldObj.ArtifactID}";
+                        }
+
+                        string fieldArtifactId = fieldObj.ArtifactID.ToString();
+                        ddlFields.Items.Add(new ListItem(fieldName, fieldArtifactId));
+                    }
+                }
+            }
+        }
+
+        // HURRAY PROJECTS DROPDOWN
+        private async Task PopulateHurrayProjectsDropdownAsync()
+        {
+            ddlHurrayProjects.Items.Clear();
+            ddlHurrayProjects.Items.Add(new ListItem("-- Select a Hurray Project --", ""));
+
+            IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
+
+            using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
+            {
+                var queryRequest = new QueryRequest
+                {
+                    ObjectType = new ObjectTypeRef { Name = "Hurray" },
+                    Fields = new List<FieldRef>
+                    {
+                        new FieldRef { Name = "Project Name" }
+                    },
+                    Sorts = new List<Sort>
+                    {
+                        new Sort
+                        {
+                            Direction = SortEnum.Ascending,
+                            FieldIdentifier = new FieldRef { Name = "Project Name" }
+                        }
+                    }
+                };
+
+                QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 1000);
+
+                if (result?.Objects != null && result.Objects.Count > 0)
+                {
+                    foreach (RelativityObject projectObj in result.Objects)
+                    {
+                        string projectName = projectObj.FieldValues?
+                            .FirstOrDefault(f => f.Field.Name == "Project Name")?.Value?.ToString();
+
+                        if (string.IsNullOrWhiteSpace(projectName))
+                        {
+                            projectName = !string.IsNullOrWhiteSpace(projectObj.Name)
+                                ? projectObj.Name
+                                : $"Project {projectObj.ArtifactID}";
+                        }
+
+                        string artifactId = projectObj.ArtifactID.ToString();
+                        ddlHurrayProjects.Items.Add(new ListItem(projectName, artifactId));
+                    }
+                }
+            }
+        }
+    }
+}
                 RegisterAsyncTask(new PageAsyncTask(PopulateFolderDropdownAsync));
                 RegisterAsyncTask(new PageAsyncTask(PopulatePrivFieldsDropdownAsync));
                 RegisterAsyncTask(new PageAsyncTask(PopulateHurrayProjectsDropdownAsync));
