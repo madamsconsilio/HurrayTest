@@ -19,21 +19,24 @@ namespace Hurray2
 {
     public partial class Default : Page
     {
-        private static readonly string ClaudeApiKey = 
-            Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.Process) 
-            ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.Machine) 
-            ?? "YOUR_ANTHROPIC_API_KEY";
+        private const string ClaudeDirectModel = "claude-3-5-sonnet-20241022";
+        private const string FloodgateDefaultModel = "anthropic.claude-sonnet-4-6";
 
-        private const string ClaudeModel = "claude-3-5-sonnet-20241022";
         private static readonly HttpClient _httpClient = new HttpClient();
 
         private int WorkspaceArtifactId => ConnectionHelper.Helper().GetActiveCaseID();
 
-        // Property to cache and access the generated Relativity bearer token across requests
-        private string RelOneToken
+        // Cached token / API key in ASP.NET Session
+        private string ActiveAnthropicToken
         {
-            get => Session["RelOne_BearerToken"]?.ToString() ?? string.Empty;
-            set => Session["RelOne_BearerToken"] = value;
+            get => Session["ActiveAnthropicToken"]?.ToString() ?? string.Empty;
+            set => Session["ActiveAnthropicToken"] = value;
+        }
+
+        private string ActiveAuthMode
+        {
+            get => Session["ActiveAuthMode"]?.ToString() ?? "DirectAnthropic";
+            set => Session["ActiveAuthMode"] = value;
         }
 
         protected void Page_Load(object sender, EventArgs e)
@@ -53,6 +56,16 @@ namespace Hurray2
                     
                     DisplayLabel.Text = $"Active Workspace ID: {WorkspaceArtifactId}\r\n" + displayString;
 
+                    // Initialize token if stored in machine/process environment variables
+                    string envKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.Process) 
+                                 ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.Machine);
+
+                    if (!string.IsNullOrEmpty(envKey) && string.IsNullOrEmpty(ActiveAnthropicToken))
+                    {
+                        ActiveAnthropicToken = envKey;
+                        ShowTokenFeedback("Loaded Anthropic API Key from server environment.", isSuccess: true);
+                    }
+
                     RegisterAsyncTask(new PageAsyncTask(PopulateFolderDropdownAsync));
                     RegisterAsyncTask(new PageAsyncTask(PopulatePrivFieldsDropdownAsync));
                     RegisterAsyncTask(new PageAsyncTask(PopulateHurrayProjectsDropdownAsync));
@@ -65,81 +78,57 @@ namespace Hurray2
         }
 
         // =========================================================================
-        // TOP BUTTON HANDLER: Generate Relativity Token (Hurray OAuth Pattern)
+        // ANTHROPIC / FLOODGATE TOKEN MANAGEMENT (Hurray Pattern)
         // =========================================================================
-        protected void btnGenerateToken_Click(object sender, EventArgs e)
+        protected void ddlAuthType_SelectedIndexChanged(object sender, EventArgs e)
         {
-            RegisterAsyncTask(new PageAsyncTask(GenerateTokenAsync));
+            if (ddlAuthType.SelectedValue == "AppleFloodgate")
+            {
+                litTokenLabel.Text = "Apple Connect OIDC Token (Bearer):";
+                litTokenHint.Text = "Paste the OIDC token acquired from appleconnect (or Hurray app Floodgate cache).";
+                txtAnthropicToken.Attributes["placeholder"] = "eyJ...";
+            }
+            else
+            {
+                litTokenLabel.Text = "Anthropic API Key (sk-ant-...):";
+                litTokenHint.Text = "Enter an Anthropic API key or leave blank to check ANTHROPIC_API_KEY environment variable.";
+                txtAnthropicToken.Attributes["placeholder"] = "sk-ant-...";
+            }
         }
 
-        private async Task GenerateTokenAsync()
+        protected void btnApplyToken_Click(object sender, EventArgs e)
         {
-            lblTokenStatus.Text = "Acquiring token from RelativityOne...";
-            lblTokenStatus.ForeColor = System.Drawing.Color.DarkBlue;
-            pnlTokenResult.Visible = false;
+            string token = (txtAnthropicToken.Text ?? "").Trim();
 
-            string instanceUrl = (txtInstanceUrl.Text ?? "").Trim().TrimEnd('/');
-            string clientId = (txtClientId.Text ?? "").Trim();
-            string clientSecret = (txtClientSecret.Text ?? "").Trim();
-
-            if (string.IsNullOrEmpty(instanceUrl) || string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret))
+            if (string.IsNullOrEmpty(token))
             {
-                lblTokenStatus.Text = "Please provide Instance URL, Client ID, and Client Secret.";
-                lblTokenStatus.ForeColor = System.Drawing.Color.Red;
+                // Try reading environment variable
+                token = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.Process) 
+                     ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.Machine) 
+                     ?? "";
+            }
+
+            if (string.IsNullOrEmpty(token))
+            {
+                ShowTokenFeedback("Please enter a token or configure ANTHROPIC_API_KEY.", isSuccess: false);
                 return;
             }
 
-            try
-            {
-                string tokenEndpoint = $"{instanceUrl}/Relativity/Identity/connect/token";
+            ActiveAnthropicToken = token;
+            ActiveAuthMode = ddlAuthType.SelectedValue;
 
-                var formFields = new Dictionary<string, string>
-                {
-                    { "grant_type", "client_credentials" },
-                    { "client_id", clientId },
-                    { "client_secret", clientSecret },
-                    { "scope", "SystemUserInfo" }
-                };
+            string masked = token.Length > 8 
+                ? token.Substring(0, 4) + "..." + token.Substring(token.Length - 4) 
+                : "****";
 
-                using (var tokenRequest = new HttpRequestMessage(HttpMethod.Post, tokenEndpoint))
-                {
-                    tokenRequest.Content = new FormUrlEncodedContent(formFields);
-                    tokenRequest.Headers.Add("User-Agent", "Hurray/1.0");
+            ShowTokenFeedback($"Token active ({masked}) for {ddlAuthType.SelectedItem.Text.Split('—')[0].Trim()}.", isSuccess: true);
+        }
 
-                    HttpResponseMessage response = await _httpClient.SendAsync(tokenRequest);
-                    string responseBody = await response.Content.ReadAsStringAsync();
-
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        lblTokenStatus.Text = $"Failed to acquire token: HTTP {(int)response.StatusCode} {response.ReasonPhrase}<br/>{Server.HtmlEncode(responseBody)}";
-                        lblTokenStatus.ForeColor = System.Drawing.Color.Red;
-                        return;
-                    }
-
-                    JObject tokenObj = JObject.Parse(responseBody);
-                    string accessToken = tokenObj["access_token"]?.ToString();
-                    string expiresIn = tokenObj["expires_in"]?.ToString() ?? "3600";
-
-                    if (string.IsNullOrEmpty(accessToken))
-                    {
-                        lblTokenStatus.Text = "Response succeeded but no 'access_token' was found.";
-                        lblTokenStatus.ForeColor = System.Drawing.Color.Red;
-                        return;
-                    }
-
-                    // Store in session and render
-                    RelOneToken = accessToken;
-                    txtGeneratedToken.Text = accessToken;
-                    pnlTokenResult.Visible = true;
-                    lblTokenStatus.Text = $"Token successfully generated! (Expires in {expiresIn} seconds)";
-                    lblTokenStatus.ForeColor = System.Drawing.Color.Green;
-                }
-            }
-            catch (Exception ex)
-            {
-                lblTokenStatus.Text = $"Token acquisition error: {ex.Message}";
-                lblTokenStatus.ForeColor = System.Drawing.Color.Red;
-            }
+        private void ShowTokenFeedback(string message, bool isSuccess)
+        {
+            lblTokenFeedback.Visible = true;
+            lblTokenFeedback.Text = message;
+            lblTokenFeedback.CssClass = isSuccess ? "status-pill status-success" : "status-pill status-error";
         }
 
         // =========================================================================
@@ -154,9 +143,17 @@ namespace Hurray2
         {
             try
             {
-                if (string.IsNullOrWhiteSpace(ClaudeApiKey) || ClaudeApiKey == "YOUR_ANTHROPIC_API_KEY")
+                // Ensure a valid token exists
+                string token = ActiveAnthropicToken;
+                if (string.IsNullOrWhiteSpace(token))
                 {
-                    lblControlNumbers.Text = "<div style='color:red;'><b>Configuration Error:</b> ANTHROPIC_API_KEY is not set or is using the default placeholder.</div>";
+                    token = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.Process) 
+                         ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.Machine);
+                }
+
+                if (string.IsNullOrWhiteSpace(token) || token == "YOUR_ANTHROPIC_API_KEY")
+                {
+                    lblControlNumbers.Text = "<div style='color:red;'><b>Authentication Error:</b> No valid Anthropic or Floodgate token has been supplied. Please save your token in the settings card above.</div>";
                     return;
                 }
 
@@ -216,7 +213,7 @@ namespace Hurray2
 
                         try
                         {
-                            JObject analysisResult = await CallClaudeForPrivilegeAnalysisAsync(controlNumber, extractedText, projectName);
+                            JObject analysisResult = await CallClaudeForPrivilegeAnalysisAsync(token, controlNumber, extractedText, projectName);
 
                             string status = analysisResult["status"]?.ToString() ?? "Unknown";
                             string rationale = analysisResult["rationale"]?.ToString() ?? "";
@@ -243,9 +240,9 @@ namespace Hurray2
         }
 
         // =========================================================================
-        // CLAUDE API INTEGRATION
+        // CLAUDE / FLOODGATE API INTEGRATION (Hurray Pattern)
         // =========================================================================
-        private async Task<JObject> CallClaudeForPrivilegeAnalysisAsync(string controlNumber, string extractedText, string projectName)
+        private async Task<JObject> CallClaudeForPrivilegeAnalysisAsync(string token, string controlNumber, string extractedText, string projectName)
         {
             string systemPrompt = "You are an expert attorney performing second-pass privilege review on discovery documents. " +
                                   "Analyze whether attorney-client privilege (ACP), work product (WP), or other protections apply. " +
@@ -255,9 +252,15 @@ namespace Hurray2
             string userPrompt = $"### Document Metadata\n- **Control Number:** {controlNumber}\n\n" +
                                 $"### Document Content\n```\n{extractedText}\n```";
 
+            bool isFloodgate = ActiveAuthMode == "AppleFloodgate";
+            string model = isFloodgate ? FloodgateDefaultModel : ClaudeDirectModel;
+            string endpoint = isFloodgate 
+                ? "https://floodgate.g.apple.com/api/anthropic/v1/messages" 
+                : "https://api.anthropic.com/v1/messages";
+
             var requestBody = new
             {
-                model = ClaudeModel,
+                model = model,
                 max_tokens = 2048,
                 system = new[]
                 {
@@ -309,10 +312,20 @@ namespace Hurray2
                 }
             };
 
-            using (var requestMessage = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages"))
+            using (var requestMessage = new HttpRequestMessage(HttpMethod.Post, endpoint))
             {
-                requestMessage.Headers.Add("x-api-key", ClaudeApiKey);
-                requestMessage.Headers.Add("anthropic-version", "2023-06-01");
+                if (isFloodgate)
+                {
+                    // Floodgate uses standard Bearer token header
+                    requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                }
+                else
+                {
+                    // Direct Anthropic API uses x-api-key & anthropic-version
+                    requestMessage.Headers.Add("x-api-key", token);
+                    requestMessage.Headers.Add("anthropic-version", "2023-06-01");
+                }
+
                 requestMessage.Content = new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json");
 
                 HttpResponseMessage response = await _httpClient.SendAsync(requestMessage);
@@ -320,7 +333,7 @@ namespace Hurray2
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    throw new Exception($"Claude API error ({response.StatusCode}): {responseJson}");
+                    throw new Exception($"Analysis API error ({response.StatusCode}): {responseJson}");
                 }
 
                 JObject parsedResponse = JObject.Parse(responseJson);
@@ -331,382 +344,6 @@ namespace Hurray2
                     return inputObj;
                 }
 
-                return new JObject
-                {
-                    ["status"] = "Completed",
-                    ["rationale"] = parsedResponse["content"]?.FirstOrDefault(b => b["type"]?.ToString() == "text")?["text"]?.ToString() ?? "No output returned"
-                };
-            }
-        }
-
-        // =========================================================================
-        // DROPDOWN POPULATION METHODS
-        // =========================================================================
-        private async Task PopulateFolderDropdownAsync()
-        {
-            try
-            {
-                ddlDynamicOptions.Items.Clear();
-                ddlDynamicOptions.Items.Add(new ListItem("-- Select a Folder --", ""));
-
-                IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
-
-                using (IFolderManager folderManager = servicesMgr.CreateProxy<IFolderManager>(ExecutionIdentity.CurrentUser))
-                {
-                    List<Folder> rootfolders = await folderManager.GetFolderTreeAsync(WorkspaceArtifactId, new List<int>());
-                    if (rootfolders != null)
-                    {
-                        foreach (Folder rootFolder in rootfolders)
-                        {
-                            AddFolderToDropDownList(rootFolder, level: 0);
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                ddlDynamicOptions.Items.Add(new ListItem($"[Error loading folders: {ex.Message}]", ""));
-            }
-        }
-
-        private void AddFolderToDropDownList(Folder currentFolder, int level)
-        {
-            string indent = level == 0 ? string.Empty : new string('\u00A0', level * 4) + "└─ ";
-            var item = new ListItem
-            {
-                Text = $"{indent}{currentFolder.Name}",
-                Value = currentFolder.ArtifactID.ToString()
-            };
-
-            ddlDynamicOptions.Items.Add(item);
-
-            if (currentFolder.Children != null && currentFolder.Children.Count > 0)
-            {
-                foreach (Folder child in currentFolder.Children)
-                {
-                    AddFolderToDropDownList(child, level + 1);
-                }
-            }
-        }
-
-        private async Task PopulatePrivFieldsDropdownAsync()
-        {
-            try
-            {
-                ddlFields.Items.Clear();
-                ddlFields.Items.Add(new ListItem("-- Select a PRIV Field --", ""));
-
-                IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
-
-                using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
-                {
-                    var queryRequest = new QueryRequest
-                    {
-                        ObjectType = new ObjectTypeRef { ArtifactTypeID = 14 }, // 14 = Field
-                        Condition = "'Object Type Artifact Type ID' == 10 AND 'Name' LIKE 'PRIV'",
-                        Fields = new List<FieldRef>
-                        {
-                            new FieldRef { Name = "Name" }
-                        },
-                        Sorts = new List<Sort>
-                        {
-                            new Sort
-                            {
-                                Direction = SortEnum.Ascending,
-                                FieldIdentifier = new FieldRef { Name = "Name" }
-                            }
-                        }
-                    };
-
-                    QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 1000);
-
-                    if (result?.Objects != null)
-                    {
-                        foreach (RelativityObject fieldObj in result.Objects)
-                        {
-                            string fieldName = fieldObj.FieldValues?.Find(f => f.Field.Name == "Name")?.Value?.ToString();
-
-                            if (string.IsNullOrEmpty(fieldName))
-                            {
-                                fieldName = !string.IsNullOrEmpty(fieldObj.Name)
-                                    ? fieldObj.Name
-                                    : $"Field {fieldObj.ArtifactID}";
-                            }
-
-                            string fieldArtifactId = fieldObj.ArtifactID.ToString();
-                            ddlFields.Items.Add(new ListItem(fieldName, fieldArtifactId));
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                ddlFields.Items.Add(new ListItem($"[Error loading fields: {ex.Message}]", ""));
-            }
-        }
-
-        private async Task PopulateHurrayProjectsDropdownAsync()
-        {
-            try
-            {
-                ddlHurrayProjects.Items.Clear();
-                ddlHurrayProjects.Items.Add(new ListItem("-- Select a Hurray Project --", ""));
-
-                IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
-
-                using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
-                {
-                    var queryRequest = new QueryRequest
-                    {
-                        ObjectType = new ObjectTypeRef { Name = "Hurray" },
-                        Fields = new List<FieldRef>
-                        {
-                            new FieldRef { Name = "Project Name" }
-                        },
-                        Sorts = new List<Sort>
-                        {
-                            new Sort
-                            {
-                                Direction = SortEnum.Ascending,
-                                FieldIdentifier = new FieldRef { Name = "Project Name" }
-                            }
-                        }
-                    };
-
-                    QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 1000);
-
-                    if (result?.Objects != null && result.Objects.Count > 0)
-                    {
-                        foreach (RelativityObject projectObj in result.Objects)
-                        {
-                            string projectName = projectObj.FieldValues?
-                                .FirstOrDefault(f => f.Field.Name == "Project Name")?.Value?.ToString();
-
-                            if (string.IsNullOrWhiteSpace(projectName))
-                            {
-                                projectName = !string.IsNullOrWhiteSpace(projectObj.Name)
-                                    ? projectObj.Name
-                                    : $"Project {projectObj.ArtifactID}";
-                            }
-
-                            string artifactId = projectObj.ArtifactID.ToString();
-                            ddlHurrayProjects.Items.Add(new ListItem(projectName, artifactId));
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                ddlHurrayProjects.Items.Add(new ListItem($"[Error loading Hurray projects: {ex.Message}]", ""));
-            }
-        }
-    }
-}                    RegisterAsyncTask(new PageAsyncTask(PopulateHurrayProjectsDropdownAsync));
-                }
-                catch (Exception ex)
-                {
-                    DisplayLabel.Text = $"Page initialization error: {ex.Message}";
-                }
-            }
-        }
-
-        // =========================================================================
-        // BUTTON CLICK HANDLER: Analyze documents via Claude API
-        // =========================================================================
-        protected void btnGetControlNumbers_Click(object sender, EventArgs e)
-        {
-            RegisterAsyncTask(new PageAsyncTask(ProcessAndAnalyzeDocumentsAsync));
-        }
-
-        private async Task ProcessAndAnalyzeDocumentsAsync()
-        {
-            try
-            {
-                // Validate API Key before proceeding
-                if (string.IsNullOrWhiteSpace(ClaudeApiKey) || ClaudeApiKey == "YOUR_ANTHROPIC_API_KEY")
-                {
-                    lblControlNumbers.Text = "<div style='color:red;'><b>Configuration Error:</b> ANTHROPIC_API_KEY is not set or is using the default placeholder.</div>";
-                    return;
-                }
-
-                IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
-
-                using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
-                {
-                    // FIX: Relativity Object Manager syntax requires 'ArtifactID' IN FOLDER {folderId}
-                    string condition = "";
-                    if (!string.IsNullOrEmpty(ddlDynamicOptions.SelectedValue) && int.TryParse(ddlDynamicOptions.SelectedValue, out int folderId))
-                    {
-                        condition = $"'ArtifactID' IN FOLDER {folderId}";
-                    }
-
-                    var queryRequest = new QueryRequest
-                    {
-                        ObjectType = new ObjectTypeRef { ArtifactTypeID = 10 }, // 10 = Document
-                        Condition = condition,
-                        Fields = new List<FieldRef>
-                        {
-                            new FieldRef { Name = "Control Number" },
-                            new FieldRef { Name = "Extracted Text" }
-                        },
-                        Sorts = new List<Sort>
-                        {
-                            new Sort
-                            {
-                                Direction = SortEnum.Ascending,
-                                FieldIdentifier = new FieldRef { Name = "Control Number" }
-                            }
-                        }
-                    };
-
-                    // Query for top 10 documents
-                    QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 10);
-
-                    if (result?.Objects == null || result.Objects.Count == 0)
-                    {
-                        lblControlNumbers.Text = "No documents found to analyze matching the selection.";
-                        return;
-                    }
-
-                    string projectName = ddlHurrayProjects.SelectedItem != null && !string.IsNullOrEmpty(ddlHurrayProjects.SelectedValue)
-                        ? ddlHurrayProjects.SelectedItem.Text
-                        : "General Review";
-
-                    List<string> displayResults = new List<string>();
-
-                    foreach (RelativityObject doc in result.Objects)
-                    {
-                        string controlNumber = doc.FieldValues?.FirstOrDefault(f => f.Field.Name == "Control Number")?.Value?.ToString() ?? doc.Name;
-                        string extractedText = doc.FieldValues?.FirstOrDefault(f => f.Field.Name == "Extracted Text")?.Value?.ToString() ?? string.Empty;
-
-                        // Truncate to avoid exceeding token limits (Hurray standard: 30,000 characters)
-                        if (extractedText.Length > 30000)
-                        {
-                            extractedText = extractedText.Substring(0, 30000);
-                        }
-
-                        try
-                        {
-                            // Call Claude API for document analysis
-                            JObject analysisResult = await CallClaudeForPrivilegeAnalysisAsync(controlNumber, extractedText, projectName);
-
-                            string status = analysisResult["status"]?.ToString() ?? "Unknown";
-                            string rationale = analysisResult["rationale"]?.ToString() ?? "";
-                            string narrative = analysisResult["privilege_log_narrative"]?.ToString() ?? "";
-
-                            displayResults.Add($"<b>{controlNumber}</b>: {status}<br/>" +
-                                               $"<i>Rationale:</i> {rationale}<br/>" +
-                                               (!string.IsNullOrEmpty(narrative) ? $"<i>Priv Log:</i> {narrative}<br/>" : "") +
-                                               "<hr/>");
-                        }
-                        catch (Exception ex)
-                        {
-                            displayResults.Add($"<b>{controlNumber}</b>: Error during analysis - {ex.Message}<hr/>");
-                        }
-                    }
-
-                    lblControlNumbers.Text = string.Join("", displayResults);
-                }
-            }
-            catch (Exception ex)
-            {
-                // Surface any Relativity query or execution errors directly in the UI
-                lblControlNumbers.Text = $"<div style='color:red;'><b>Execution Error:</b> {ex.Message}<br/><pre>{ex.StackTrace}</pre></div>";
-            }
-        }
-
-        // =========================================================================
-        // CLAUDE API INTEGRATION (Hurray Tool-Calling Pattern)
-        // =========================================================================
-        private async Task<JObject> CallClaudeForPrivilegeAnalysisAsync(string controlNumber, string extractedText, string projectName)
-        {
-            string systemPrompt = "You are an expert attorney performing second-pass privilege review on discovery documents. " +
-                                  "Analyze whether attorney-client privilege (ACP), work product (WP), or other protections apply. " +
-                                  "Determine privilege status, confidence score, rationale, flags, and generate privilege log entries. " +
-                                  $"Matter/Project Name: {projectName}";
-
-            string userPrompt = $"### Document Metadata\n- **Control Number:** {controlNumber}\n\n" +
-                                $"### Document Content\n```\n{extractedText}\n```";
-
-            var requestBody = new
-            {
-                model = ClaudeModel,
-                max_tokens = 2048,
-                system = new[]
-                {
-                    new { type = "text", text = systemPrompt }
-                },
-                tools = new[]
-                {
-                    new
-                    {
-                        name = "record_privilege_analysis",
-                        description = "Records the privilege determination, rationale, and privilege log entry for a document.",
-                        input_schema = new
-                        {
-                            type = "object",
-                            properties = new
-                            {
-                                status = new
-                                {
-                                    type = "string",
-                                    @enum = new[] { "Privileged", "Not Privileged", "Potentially Privileged" },
-                                    description = "Core privilege determination"
-                                },
-                                privilege_types = new
-                                {
-                                    type = "array",
-                                    items = new { type = "string", @enum = new[] { "ACP", "WP", "Common Interest", "Mediation Privilege" } }
-                                },
-                                redact_privilege_tag = new
-                                {
-                                    type = "string",
-                                    @enum = new[] { "Withhold", "Redaction Needed" }
-                                },
-                                confidence_score = new { type = "number", description = "0.0 to 1.0" },
-                                rationale = new { type = "string", description = "Detailed legal reasoning" },
-                                privilege_log_narrative = new { type = "string", description = "Privilege log prose description" }
-                            },
-                            required = new[] { "status", "rationale" }
-                        }
-                    }
-                },
-                tool_choice = new
-                {
-                    type = "tool",
-                    name = "record_privilege_analysis"
-                },
-                messages = new[]
-                {
-                    new { role = "user", content = userPrompt }
-                }
-            };
-
-            using (var requestMessage = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages"))
-            {
-                requestMessage.Headers.Add("x-api-key", ClaudeApiKey);
-                requestMessage.Headers.Add("anthropic-version", "2023-06-01");
-                requestMessage.Content = new StringContent(JsonConvert.SerializeObject(requestBody), Encoding.UTF8, "application/json");
-
-                HttpResponseMessage response = await _httpClient.SendAsync(requestMessage);
-                string responseJson = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    throw new Exception($"Claude API error ({response.StatusCode}): {responseJson}");
-                }
-
-                JObject parsedResponse = JObject.Parse(responseJson);
-
-                // Extract input parameters from the record_privilege_analysis tool_use block
-                JToken toolUseBlock = parsedResponse["content"]?.FirstOrDefault(b => b["type"]?.ToString() == "tool_use");
-
-                if (toolUseBlock != null && toolUseBlock["input"] is JObject inputObj)
-                {
-                    return inputObj;
-                }
-
-                // Fallback if returned in raw text
                 return new JObject
                 {
                     ["status"] = "Completed",
