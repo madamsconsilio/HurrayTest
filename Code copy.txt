@@ -35,7 +35,7 @@ namespace Hurray2
             string fullName = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.FullName;
             int currentUserWorkspaceArtifactId = Relativity.CustomPages.ConnectionHelper.Helper().GetAuthenticationManager().UserInfo.WorkspaceUserArtifactID;
 
-            string displayString = String.Format("User: {0}\r\nUser ID: {1}\r\nUser Email: {2}\r\n\r\n Hello {3}, the time is {4}.", 
+            string displayString = String.Format("User: {0}\r\nUser ID: {1}\r\nUser Email: {2}\r\n\r\n Hello {3}, the time is {4}.",
                 fullName, userArtifactId, userEmailAddress, firstName, DateTime.Now.ToShortTimeString());
             string v = $"Active Workspace ID: {WorkspaceArtifactId}\r\n" + displayString;
 
