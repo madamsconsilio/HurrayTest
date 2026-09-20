@@ -1,6 +1,4 @@
-<asp:Button ID="btnGenerateToken" runat="server" Text="Generate Floodgate Token" OnClick="btnGenerateToken_Click" />
-<asp:Label ID="lblTokenStatus" runat="server" />
-
+using Newtonsoft.Json.Linq;
 using Relativity.API;
 using Relativity.CustomPages;
 using Relativity.Services.Folder;
@@ -11,7 +9,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Text.Json; // Or Newtonsoft.Json
 using System.Threading.Tasks;
 using System.Web.UI;
 using System.Web.UI.WebControls;
@@ -24,10 +21,10 @@ namespace Hurray2
         private int WorkspaceArtifactId => ConnectionHelper.Helper().GetActiveCaseID();
 
         // -------------------------------------------------------------
-        // FLOODGATE CONFIGURATION (Adjust endpoints & credentials)
+        // FLOODGATE CONFIGURATION
         // -------------------------------------------------------------
         private static readonly HttpClient _httpClient = new HttpClient();
-        private const string FloodgateTokenUrl = "https://floodgate.apple.com/oauth/token"; // Update with your Floodgate token URL
+        private const string FloodgateTokenUrl = "https://floodgate.apple.com/oauth/token";
         private const string ClientId = "YOUR_FLOODGATE_CLIENT_ID";
         private const string ClientSecret = "YOUR_FLOODGATE_CLIENT_SECRET";
 
@@ -54,7 +51,7 @@ namespace Hurray2
         }
 
         // -------------------------------------------------------------
-        // FLOODGATE TOKEN GENERATION
+        // FLOODGATE TOKEN GENERATION (Using Newtonsoft.Json)
         // -------------------------------------------------------------
         protected void btnGenerateToken_Click(object sender, EventArgs e)
         {
@@ -66,8 +63,6 @@ namespace Hurray2
             try
             {
                 string token = await GetFloodgateTokenAsync();
-                
-                // Store in session or viewstate if needed across requests
                 Session["FloodgateToken"] = token;
 
                 if (lblTokenStatus != null)
@@ -86,46 +81,43 @@ namespace Hurray2
 
         public async Task<string> GetFloodgateTokenAsync()
         {
-            var requestBody = new FormUrlEncodedContent(new[]
+            var parameters = new List<KeyValuePair<string, string>>
             {
                 new KeyValuePair<string, string>("grant_type", "client_credentials"),
                 new KeyValuePair<string, string>("client_id", ClientId),
-                new KeyValuePair<string, string>("client_secret", ClientSecret),
-                // Add "scope" or "resource" if your Floodgate profile requires it:
-                // new KeyValuePair<string, string>("scope", "read write")
-            });
+                new KeyValuePair<string, string>("client_secret", ClientSecret)
+            };
 
+            using (var requestContent = new FormUrlEncodedContent(parameters))
             using (var request = new HttpRequestMessage(HttpMethod.Post, FloodgateTokenUrl))
             {
-                request.Content = requestBody;
+                request.Content = requestContent;
                 request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
                 HttpResponseMessage response = await _httpClient.SendAsync(request);
-
-                string responseContent = await response.Content.ReadAsStringAsync();
+                string responseBody = await response.Content.ReadAsStringAsync();
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    throw new HttpRequestException($"Floodgate returned status {response.StatusCode}: {responseContent}");
+                    throw new HttpRequestException($"Floodgate returned {(int)response.StatusCode}: {responseBody}");
                 }
 
-                using (JsonDocument doc = JsonDocument.Parse(responseContent))
+                // Parsed with Newtonsoft.Json
+                JObject json = JObject.Parse(responseBody);
+                string accessToken = (string)json["access_token"] ?? (string)json["token"];
+
+                if (string.IsNullOrEmpty(accessToken))
                 {
-                    if (doc.RootElement.TryGetProperty("access_token", out JsonElement tokenElement))
-                    {
-                        return tokenElement.GetString();
-                    }
-                    else if (doc.RootElement.TryGetProperty("token", out JsonElement altTokenElement))
-                    {
-                        return altTokenElement.GetString();
-                    }
-
-                    throw new InvalidOperationException("Response did not contain an 'access_token' property.");
+                    throw new InvalidOperationException("Response JSON did not contain an 'access_token' or 'token' property.");
                 }
+
+                return accessToken;
             }
         }
 
+        // -------------------------------------------------------------
         // BUTTON CLICK HANDLER
+        // -------------------------------------------------------------
         protected void btnGetControlNumbers_Click(object sender, EventArgs e)
         {
             RegisterAsyncTask(new PageAsyncTask(DisplayTop10ControlNumbersAsync));
@@ -178,7 +170,9 @@ namespace Hurray2
             }
         }
 
+        // -------------------------------------------------------------
         // FOLDER DROPDOWN
+        // -------------------------------------------------------------
         private async Task PopulateFolderDropdownAsync()
         {
             ddlDynamicOptions.Items.Clear();
@@ -219,7 +213,9 @@ namespace Hurray2
             }
         }
 
-        // FIELDS DROP DOWN
+        // -------------------------------------------------------------
+        // FIELDS DROPDOWN
+        // -------------------------------------------------------------
         private async Task PopulatePrivFieldsDropdownAsync()
         {
             ddlFields.Items.Clear();
@@ -269,7 +265,9 @@ namespace Hurray2
             }
         }
 
+        // -------------------------------------------------------------
         // HURRAY PROJECTS DROPDOWN
+        // -------------------------------------------------------------
         private async Task PopulateHurrayProjectsDropdownAsync()
         {
             ddlHurrayProjects.Items.Clear();
@@ -318,210 +316,5 @@ namespace Hurray2
                 }
             }
         }
-    }
-}
-                RegisterAsyncTask(new PageAsyncTask(PopulateFolderDropdownAsync));
-                RegisterAsyncTask(new PageAsyncTask(PopulatePrivFieldsDropdownAsync));
-                RegisterAsyncTask(new PageAsyncTask(PopulateHurrayProjectsDropdownAsync));
-            }
-        }
-
-        // BUTTON CLICK HANDLER
-        protected void btnGetControlNumbers_Click(object sender, EventArgs e)
-        {
-            RegisterAsyncTask(new PageAsyncTask(DisplayTop10ControlNumbersAsync));
-        }
-
-        private async Task DisplayTop10ControlNumbersAsync()
-        {
-            IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
-
-            using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
-            {
-                var queryRequest = new QueryRequest
-                {
-                    ObjectType = new ObjectTypeRef { ArtifactTypeID = 10 }, // 10 = Document
-                    Fields = new List<FieldRef>
-                    {
-                        new FieldRef { Name = "Control Number" }
-                    },
-                    Sorts = new List<Sort>
-                    {
-                        new Sort
-                        {
-                            Direction = SortEnum.Ascending,
-                            FieldIdentifier = new FieldRef { Name = "Control Number" }
-                        }
-                    }
-                };
-
-                // Query for the top 10 documents (start index: 1, length: 10)
-                QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 10);
-
-                if (result?.Objects != null && result.Objects.Count > 0)
-                {
-                    List<string> controlNumbers = new List<string>();
-
-                    foreach (RelativityObject doc in result.Objects)
-                    {
-                        string controlNumber = doc.FieldValues?
-                            .FirstOrDefault(f => f.Field.Name == "Control Number")?.Value?.ToString()
-                            ?? doc.Name;
-
-                        controlNumbers.Add(controlNumber);
-                    }
-
-                    lblControlNumbers.Text = string.Join("<br/>", controlNumbers);
-                }
-                else
-                {
-                    lblControlNumbers.Text = "No documents found.";
-                }
-            }
-        }
-
-        // FOLDER DROPDOWN
-        private async Task PopulateFolderDropdownAsync()
-        {
-            ddlDynamicOptions.Items.Clear();
-            ddlDynamicOptions.Items.Add(new ListItem("-- Select a Folder --", ""));
-
-            IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
-
-            using (IFolderManager folderManager = servicesMgr.CreateProxy<IFolderManager>(ExecutionIdentity.CurrentUser))
-            {
-                List<Folder> rootfolders = await folderManager.GetFolderTreeAsync(WorkspaceArtifactId, new List<int>());
-                if (rootfolders != null)
-                {
-                    foreach (Folder rootFolder in rootfolders)
-                    {
-                        AddFolderToDropDownList(rootFolder, level: 0);
-                    }
-                }
-            }
-        }
-
-        private void AddFolderToDropDownList(Folder currentFolder, int level)
-        {
-            string indent = level == 0 ? string.Empty : new string('\u00A0', level * 4) + "└─ ";
-            var item = new ListItem
-            {
-                Text = $"{indent}{currentFolder.Name}",
-                Value = currentFolder.ArtifactID.ToString()
-            };
-
-            ddlDynamicOptions.Items.Add(item);
-
-            if (currentFolder.Children != null && currentFolder.Children.Count > 0)
-            {
-                foreach (Folder child in currentFolder.Children)
-                {
-                    AddFolderToDropDownList(child, level + 1);
-                }
-            }
-        }
-        // END FOLDER DROPDOWN
-
-        // FIELDS DROP DOWN
-        private async Task PopulatePrivFieldsDropdownAsync()
-        {
-            ddlFields.Items.Clear();
-            ddlFields.Items.Add(new ListItem("-- Select a PRIV Field --", ""));
-
-            IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
-
-            using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
-            {
-                var queryRequest = new QueryRequest
-                {
-                    ObjectType = new ObjectTypeRef { ArtifactTypeID = 14 }, // 14 = Field
-                    Condition = "'Object Type Artifact Type ID' == 10 AND 'Name' LIKE 'PRIV'",
-                    Fields = new List<FieldRef>
-                    {
-                        new FieldRef { Name = "Name" }
-                    },
-                    Sorts = new List<Sort>
-                    {
-                        new Sort
-                        {
-                            Direction = SortEnum.Ascending,
-                            FieldIdentifier = new FieldRef { Name = "Name" }
-                        }
-                    }
-                };
-
-                QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 1000);
-
-                if (result?.Objects != null)
-                {
-                    foreach (RelativityObject fieldObj in result.Objects)
-                    {
-                        string fieldName = fieldObj.FieldValues?.Find(f => f.Field.Name == "Name")?.Value?.ToString();
-
-                        if (string.IsNullOrEmpty(fieldName))
-                        {
-                            fieldName = !string.IsNullOrEmpty(fieldObj.Name)
-                                ? fieldObj.Name
-                                : $"Field {fieldObj.ArtifactID}";
-                        }
-
-                        string fieldArtifactId = fieldObj.ArtifactID.ToString();
-                        ddlFields.Items.Add(new ListItem(fieldName, fieldArtifactId));
-                    }
-                }
-            }
-        }
-        // END FIELDS DROPDOWN
-
-        // HURRAY PROJECTS DROPDOWN
-        private async Task PopulateHurrayProjectsDropdownAsync()
-        {
-            ddlHurrayProjects.Items.Clear();
-            ddlHurrayProjects.Items.Add(new ListItem("-- Select a Hurray Project --", ""));
-
-            IServicesMgr servicesMgr = ConnectionHelper.Helper().GetServicesManager();
-
-            using (IObjectManager objectManager = servicesMgr.CreateProxy<IObjectManager>(ExecutionIdentity.CurrentUser))
-            {
-                var queryRequest = new QueryRequest
-                {
-                    ObjectType = new ObjectTypeRef { Name = "Hurray" },
-                    Fields = new List<FieldRef>
-                    {
-                        new FieldRef { Name = "Project Name" }
-                    },
-                    Sorts = new List<Sort>
-                    {
-                        new Sort
-                        {
-                            Direction = SortEnum.Ascending,
-                            FieldIdentifier = new FieldRef { Name = "Project Name" }
-                        }
-                    }
-                };
-
-                QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 1000);
-
-                if (result?.Objects != null && result.Objects.Count > 0)
-                {
-                    foreach (RelativityObject projectObj in result.Objects)
-                    {
-                        string projectName = projectObj.FieldValues?
-                            .FirstOrDefault(f => f.Field.Name == "Project Name")?.Value?.ToString();
-
-                        if (string.IsNullOrWhiteSpace(projectName))
-                        {
-                            projectName = !string.IsNullOrWhiteSpace(projectObj.Name)
-                                ? projectObj.Name
-                                : $"Project {projectObj.ArtifactID}";
-                        }
-
-                        string artifactId = projectObj.ArtifactID.ToString();
-                        ddlHurrayProjects.Items.Add(new ListItem(projectName, artifactId));
-                    }
-                }
-            }
-        }
-        // END HURRAY PROJECTS DROPDOWN
     }
 }
