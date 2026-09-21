@@ -1,3 +1,19 @@
+1. In Default.aspx (Add controls)
+
+Place these controls where you want to test the connection (e.g., right under the token section):
+
+<div class="section">
+    <div class="section-title">Floodgate Test</div>
+    <asp:Button ID="btnTestFloodgate" runat="server" Text="Test Floodgate Connection" CssClass="btn" OnClick="btnTestFloodgate_Click" />
+    <div style="margin-top: 10px;">
+        <asp:Label ID="lblFloodgateResponse" runat="server" />
+    </div>
+</div>
+
+2. Full Code-Behind (Default.aspx.cs)
+
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using Relativity.API;
 using Relativity.CustomPages;
 using Relativity.Services.Folder;
@@ -6,6 +22,9 @@ using Relativity.Services.Objects.DataContracts;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Threading.Tasks;
 using System.Web.UI;
 using System.Web.UI.WebControls;
@@ -16,6 +35,13 @@ namespace Hurray2
     {
         // Alternate way to get workspaceID
         private int WorkspaceArtifactId => ConnectionHelper.Helper().GetActiveCaseID();
+
+        // -------------------------------------------------------------
+        // FLOODGATE CONFIGURATION (Matching Hurray)
+        // -------------------------------------------------------------
+        private static readonly HttpClient _httpClient = new HttpClient();
+        private const string FloodgateEndpoint = "https://floodgate.g.apple.com/api/anthropic/v1/messages";
+        private const string DefaultModel = "anthropic.claude-sonnet-4-6";
 
         protected void Page_Load(object sender, EventArgs e)
         {
@@ -102,7 +128,95 @@ namespace Hurray2
             }
         }
 
+        // -------------------------------------------------------------
+        // FLOODGATE API CALL
+        // -------------------------------------------------------------
+        protected void btnTestFloodgate_Click(object sender, EventArgs e)
+        {
+            RegisterAsyncTask(new PageAsyncTask(TestFloodgateConnectionAsync));
+        }
+
+        private async Task TestFloodgateConnectionAsync()
+        {
+            try
+            {
+                string token = CurrentFloodgateToken;
+                if (string.IsNullOrWhiteSpace(token))
+                {
+                    if (lblFloodgateResponse != null)
+                    {
+                        lblFloodgateResponse.Text = "<span style='color:red;'>Error: Please enter and save a Floodgate token first.</span>";
+                    }
+                    return;
+                }
+
+                if (lblFloodgateResponse != null)
+                {
+                    lblFloodgateResponse.Text = "Sending test request to Floodgate...";
+                }
+
+                string prompt = "Hello! Please reply with a short confirmation message indicating you are connected to the Hurray Relativity Custom Page.";
+                string responseText = await CallFloodgateAsync(prompt, token);
+
+                if (lblFloodgateResponse != null)
+                {
+                    lblFloodgateResponse.Text = $"<div style='background:#f0f7ff; border:1px solid #cce3f5; padding:10px; border-radius:4px;'><strong>Floodgate Response:</strong><br/>{Server.HtmlEncode(responseText).Replace("\n", "<br/>")}</div>";
+                }
+            }
+            catch (Exception ex)
+            {
+                if (lblFloodgateResponse != null)
+                {
+                    lblFloodgateResponse.Text = $"<span style='color:red;'>Floodgate Call Failed: {Server.HtmlEncode(ex.Message)}</span>";
+                }
+            }
+        }
+
+        public async Task<string> CallFloodgateAsync(string prompt, string bearerToken, string model = DefaultModel)
+        {
+            // Floodgate Anthropic Messages API payload format
+            var requestBody = new
+            {
+                model = model,
+                max_tokens = 1024,
+                messages = new[]
+                {
+                    new { role = "user", content = prompt }
+                }
+            };
+
+            string jsonPayload = JsonConvert.SerializeObject(requestBody);
+
+            using (var request = new HttpRequestMessage(HttpMethod.Post, FloodgateEndpoint))
+            {
+                request.Content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
+                // Floodgate expects Bearer authorization with the OIDC token
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearerToken);
+
+                HttpResponseMessage response = await _httpClient.SendAsync(request);
+                string responseBody = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new HttpRequestException($"HTTP {(int)response.StatusCode} ({response.ReasonPhrase}): {responseBody}");
+                }
+
+                // Parse Anthropic Messages API format: content[0].text
+                JObject json = JObject.Parse(responseBody);
+                var contentArray = json["content"] as JArray;
+                if (contentArray != null && contentArray.Count > 0)
+                {
+                    string text = (string)contentArray[0]["text"];
+                    return text ?? string.Empty;
+                }
+
+                return responseBody;
+            }
+        }
+
+        // -------------------------------------------------------------
         // BUTTON CLICK HANDLER
+        // -------------------------------------------------------------
         protected void btnGetControlNumbers_Click(object sender, EventArgs e)
         {
             RegisterAsyncTask(new PageAsyncTask(DisplayTop10ControlNumbersAsync));
@@ -133,7 +247,6 @@ namespace Hurray2
                         }
                     };
 
-                    // Query for the top 10 documents (start index: 1, length: 10)
                     QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 10);
 
                     if (result?.Objects != null && result.Objects.Count > 0)
@@ -169,7 +282,9 @@ namespace Hurray2
             }
         }
 
+        // -------------------------------------------------------------
         // FOLDER DROPDOWN
+        // -------------------------------------------------------------
         private async Task PopulateFolderDropdownAsync()
         {
             try
@@ -221,9 +336,10 @@ namespace Hurray2
                 }
             }
         }
-        // END FOLDER DROPDOWN
 
-        // FIELDS DROP DOWN
+        // -------------------------------------------------------------
+        // FIELDS DROPDOWN
+        // -------------------------------------------------------------
         private async Task PopulatePrivFieldsDropdownAsync()
         {
             try
@@ -284,9 +400,10 @@ namespace Hurray2
                 }
             }
         }
-        // END FIELDS DROPDOWN
 
+        // -------------------------------------------------------------
         // HURRAY PROJECTS DROPDOWN
+        // -------------------------------------------------------------
         private async Task PopulateHurrayProjectsDropdownAsync()
         {
             try
@@ -347,6 +464,5 @@ namespace Hurray2
                 }
             }
         }
-        // END HURRAY PROJECTS DROPDOWN
     }
 }
