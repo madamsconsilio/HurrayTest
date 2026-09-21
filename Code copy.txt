@@ -39,9 +39,9 @@ namespace Hurray2
                         DisplayLabel.Text = v;
                     }
 
-                    if (Session["FloodgateToken"] != null && lblTokenStatus != null)
+                    if (ViewState["FloodgateToken"] != null && lblTokenStatus != null)
                     {
-                        lblTokenStatus.Text = "<span style='color:green;'>✓ Token active in session</span>";
+                        lblTokenStatus.Text = "<span style='color:green;'>✓ Token active in ViewState</span>";
                     }
 
                     RegisterAsyncTask(new PageAsyncTask(PopulateFolderDropdownAsync));
@@ -66,7 +66,7 @@ namespace Hurray2
                 {
                     return txtFloodgateToken.Text.Trim();
                 }
-                return Session["FloodgateToken"] as string;
+                return ViewState["FloodgateToken"] as string;
             }
         }
 
@@ -78,15 +78,15 @@ namespace Hurray2
                 string token = txtFloodgateToken != null ? txtFloodgateToken.Text.Trim() : string.Empty;
                 if (!string.IsNullOrEmpty(token))
                 {
-                    Session["FloodgateToken"] = token;
+                    ViewState["FloodgateToken"] = token;
                     if (lblTokenStatus != null)
                     {
-                        lblTokenStatus.Text = "<span style='color:green;'>✓ Token saved to session!</span>";
+                        lblTokenStatus.Text = "<span style='color:green;'>✓ Token saved!</span>";
                     }
                 }
                 else
                 {
-                    Session["FloodgateToken"] = null;
+                    ViewState["FloodgateToken"] = null;
                     if (lblTokenStatus != null)
                     {
                         lblTokenStatus.Text = "<span style='color:red;'>Token cannot be empty.</span>";
