@@ -1,16 +1,49 @@
-{1}\r\nUser Email: {2}\r\n\r\n Hello {3}, the time is {4}.", fullName, userArtifactId, userEmailAddress, firstName, DateTime.Now.ToShortTimeString());
+using Relativity.API;
+using Relativity.CustomPages;
+using Relativity.Services.Folder;
+using Relativity.Services.Objects;
+using Relativity.Services.Objects.DataContracts;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Web.UI;
+using System.Web.UI.WebControls;
+
+namespace Hurray2
+{
+    public partial class Default : Page
+    {
+        // Alternate way to get workspaceID
+        private int WorkspaceArtifactId => ConnectionHelper.Helper().GetActiveCaseID();
+
+        protected void Page_Load(object sender, EventArgs e)
+        {
+            try
+            {
+                var userInfo = ConnectionHelper.Helper().GetAuthenticationManager().UserInfo;
+                int userArtifactId = userInfo.ArtifactID;
+                string userEmailAddress = userInfo.EmailAddress;
+                string firstName = userInfo.FirstName;
+                string lastName = userInfo.LastName;
+                string fullName = userInfo.FullName;
+                int currentUserWorkspaceArtifactId = userInfo.WorkspaceUserArtifactID;
+
+                string displayString = string.Format("User: {0}\r\nUser ID: {1}\r\nUser Email: {2}\r\n\r\n Hello {3}, the time is {4}.", fullName, userArtifactId, userEmailAddress, firstName, DateTime.Now.ToShortTimeString());
                 string v = $"Active Workspace ID: {WorkspaceArtifactId}<br/>" + displayString.Replace("\r\n", "<br/>");
 
                 if (!IsPostBack)
                 {
-                    if (DisplayLabel != null) DisplayLabel.Text = v;
+                    if (DisplayLabel != null)
+                    {
+                        DisplayLabel.Text = v;
+                    }
 
                     if (Session["FloodgateToken"] != null && lblTokenStatus != null)
                     {
                         lblTokenStatus.Text = "<span style='color:green;'>✓ Token active in session</span>";
                     }
 
-                    // Register tasks safely
                     RegisterAsyncTask(new PageAsyncTask(PopulateFolderDropdownAsync));
                     RegisterAsyncTask(new PageAsyncTask(PopulatePrivFieldsDropdownAsync));
                     RegisterAsyncTask(new PageAsyncTask(PopulateHurrayProjectsDropdownAsync));
@@ -37,6 +70,7 @@
             }
         }
 
+        // SAVE TOKEN BUTTON HANDLER
         protected void btnSaveToken_Click(object sender, EventArgs e)
         {
             try
@@ -68,6 +102,7 @@
             }
         }
 
+        // BUTTON CLICK HANDLER
         protected void btnGetControlNumbers_Click(object sender, EventArgs e)
         {
             RegisterAsyncTask(new PageAsyncTask(DisplayTop10ControlNumbersAsync));
@@ -98,6 +133,7 @@
                         }
                     };
 
+                    // Query for the top 10 documents (start index: 1, length: 10)
                     QueryResult result = await objectManager.QueryAsync(WorkspaceArtifactId, queryRequest, 1, 10);
 
                     if (result?.Objects != null && result.Objects.Count > 0)
@@ -133,6 +169,7 @@
             }
         }
 
+        // FOLDER DROPDOWN
         private async Task PopulateFolderDropdownAsync()
         {
             try
@@ -184,7 +221,9 @@
                 }
             }
         }
+        // END FOLDER DROPDOWN
 
+        // FIELDS DROP DOWN
         private async Task PopulatePrivFieldsDropdownAsync()
         {
             try
@@ -245,7 +284,9 @@
                 }
             }
         }
+        // END FIELDS DROPDOWN
 
+        // HURRAY PROJECTS DROPDOWN
         private async Task PopulateHurrayProjectsDropdownAsync()
         {
             try
@@ -306,5 +347,6 @@
                 }
             }
         }
+        // END HURRAY PROJECTS DROPDOWN
     }
 }
