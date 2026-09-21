@@ -1,17 +1,3 @@
-1. In Default.aspx (Add controls)
-
-Place these controls where you want to test the connection (e.g., right under the token section):
-
-<div class="section">
-    <div class="section-title">Floodgate Test</div>
-    <asp:Button ID="btnTestFloodgate" runat="server" Text="Test Floodgate Connection" CssClass="btn" OnClick="btnTestFloodgate_Click" />
-    <div style="margin-top: 10px;">
-        <asp:Label ID="lblFloodgateResponse" runat="server" />
-    </div>
-</div>
-
-2. Full Code-Behind (Default.aspx.cs)
-
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Relativity.API;
@@ -22,6 +8,7 @@ using Relativity.Services.Objects.DataContracts;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -165,16 +152,29 @@ namespace Hurray2
             }
             catch (Exception ex)
             {
+                // Unpack the real inner network exception
+                string fullError = ex.Message;
+                Exception inner = ex.InnerException;
+                while (inner != null)
+                {
+                    fullError += $" &rarr; {inner.Message}";
+                    inner = inner.InnerException;
+                }
+
                 if (lblFloodgateResponse != null)
                 {
-                    lblFloodgateResponse.Text = $"<span style='color:red;'>Floodgate Call Failed: {Server.HtmlEncode(ex.Message)}</span>";
+                    lblFloodgateResponse.Text = $"<span style='color:red;'>Floodgate Call Failed: {fullError}</span>";
                 }
             }
         }
 
         public async Task<string> CallFloodgateAsync(string prompt, string bearerToken, string model = DefaultModel)
         {
-            // Floodgate Anthropic Messages API payload format
+            // Force modern TLS protocols (TLS 1.2 = 3072, TLS 1.3 = 12288)
+            ServicePointManager.SecurityProtocol |= 
+                SecurityProtocolType.Tls12 | 
+                (SecurityProtocolType)12288;
+
             var requestBody = new
             {
                 model = model,
