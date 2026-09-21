@@ -1,5 +1,268 @@
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
+1. Default.aspx (Complete Markup with JavaScript Bridge)
+
+Replace your Default.aspx with this:
+
+<%@ Page Language="C#" AutoEventWireup="true" CodeBehind="Default.aspx.cs" Inherits="Hurray2.Default" Async="true" %>
+
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head runat="server">
+    <title>Hurray Privilege Review</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 24px;
+            background-color: #f7f9fa;
+            color: #333;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 24px;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+        }
+        .section {
+            margin-bottom: 24px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #e5e5e5;
+        }
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #111;
+        }
+        .form-group {
+            margin-bottom: 14px;
+        }
+        label {
+            display: block;
+            font-weight: 500;
+            margin-bottom: 6px;
+            font-size: 13px;
+        }
+        .form-control {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-size: 13px;
+        }
+        .btn {
+            background-color: #0070c9;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        .btn:hover {
+            background-color: #005bb5;
+        }
+        .btn-secondary {
+            background-color: #4b5563;
+        }
+        .btn-secondary:hover {
+            background-color: #374151;
+        }
+        .hint-text {
+            font-size: 11px;
+            color: #777;
+            margin-top: 4px;
+            line-height: 1.4;
+        }
+        .response-box {
+            background: #f0f7ff;
+            border: 1px solid #cce3f5;
+            padding: 12px;
+            border-radius: 4px;
+            margin-top: 12px;
+            font-size: 13px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+    </style>
+</head>
+<body>
+    <form id="form1" runat="server">
+        <div class="container">
+            <h2>Hurray Relativity Review</h2>
+
+            <!-- User Info & Workspace -->
+            <div class="section">
+                <asp:Label ID="DisplayLabel" runat="server" Font-Names="Courier New" Font-Size="Small" />
+            </div>
+
+            <!-- Floodgate Token Section (Handled client-side) -->
+            <div class="section">
+                <div class="section-title">Floodgate Authentication (Browser-to-AppleNet Bridge)</div>
+                <div class="form-group">
+                    <label for="txtClientToken">Floodgate ID Token:</label>
+                    <input type="password" id="txtClientToken" class="form-control" placeholder="Paste oauth-id-token from appleconnect here..." />
+                    <div class="hint-text">
+                        Obtain via Terminal on your Mac:
+                        <code>appleconnect getToken -C hvys3fcwcteqrvw3qzkvtk86viuoqv --token-type=oauth -G pkce -o "openid,dsid,accountname,profile,groups"</code>
+                    </div>
+                </div>
+                <button type="button" class="btn" onclick="saveTokenToBrowser()">Save Token in Browser</button>
+                <button type="button" class="btn btn-secondary" onclick="toggleTokenVisibility()">Show/Hide Token</button>
+                <span id="clientTokenStatus" style="margin-left: 10px; font-size: 12px;"></span>
+            </div>
+
+            <!-- Floodgate Direct Test -->
+            <div class="section">
+                <div class="section-title">Floodgate Direct Test</div>
+                <p style="font-size: 12px; color: #555;">
+                    This request routes directly from your browser to <code>https://floodgate.g.apple.com</code> via your Mac's active VPN connection.
+                </p>
+                <button type="button" class="btn" onclick="testFloodgateDirectly()">Test Floodgate Connection</button>
+                <div id="floodgateDirectResponse" style="display:none;" class="response-box"></div>
+            </div>
+
+            <!-- Project & Review Dropdowns -->
+            <div class="section">
+                <div class="section-title">Project & Review Settings</div>
+
+                <div class="form-group">
+                    <label>Hurray Project:</label>
+                    <asp:DropDownList ID="ddlHurrayProjects" runat="server" CssClass="form-control" />
+                </div>
+
+                <div class="form-group">
+                    <label>Folder Tree:</label>
+                    <asp:DropDownList ID="ddlDynamicOptions" runat="server" CssClass="form-control" />
+                </div>
+
+                <div class="form-group">
+                    <label>Privilege Field:</label>
+                    <asp:DropDownList ID="ddlFields" runat="server" CssClass="form-control" />
+                </div>
+            </div>
+
+            <!-- Documents Section -->
+            <div class="section">
+                <div class="section-title">Documents</div>
+                <asp:Button ID="btnGetControlNumbers" runat="server" Text="Get Top 10 Control Numbers" CssClass="btn" OnClick="btnGetControlNumbers_Click" />
+                <div style="margin-top: 12px;">
+                    <asp:Label ID="lblControlNumbers" runat="server" />
+                </div>
+            </div>
+        </div>
+    </form>
+
+    <script type="text/javascript">
+        const FLOODGATE_URL = "https://floodgate.g.apple.com/api/anthropic/v1/messages";
+        const DEFAULT_MODEL = "anthropic.claude-sonnet-4-6";
+
+        // Load token from browser session storage on page load
+        window.addEventListener("DOMContentLoaded", () => {
+            const saved = sessionStorage.getItem("FloodgateIdToken");
+            const status = document.getElementById("clientTokenStatus");
+            const input = document.getElementById("txtClientToken");
+
+            if (saved) {
+                input.value = saved;
+                status.innerHTML = "<span style='color:green;'>✓ Token active in browser session</span>";
+            }
+        });
+
+        function saveTokenToBrowser() {
+            const input = document.getElementById("txtClientToken");
+            const status = document.getElementById("clientTokenStatus");
+            const token = input.value.trim();
+
+            if (!token) {
+                sessionStorage.removeItem("FloodgateIdToken");
+                status.innerHTML = "<span style='color:red;'>Token cannot be empty.</span>";
+                return;
+            }
+
+            sessionStorage.setItem("FloodgateIdToken", token);
+            status.innerHTML = "<span style='color:green;'>✓ Token saved in browser!</span>";
+        }
+
+        function toggleTokenVisibility() {
+            const input = document.getElementById("txtClientToken");
+            input.type = input.type === "password" ? "text" : "password";
+        }
+
+        async function testFloodgateDirectly() {
+            const respBox = document.getElementById("floodgateDirectResponse");
+            respBox.style.display = "block";
+            respBox.style.color = "#333";
+            respBox.innerHTML = "Sending request directly to Floodgate via your browser...";
+
+            const token = document.getElementById("txtClientToken").value.trim() || sessionStorage.getItem("FloodgateIdToken");
+
+            if (!token) {
+                respBox.style.color = "red";
+                respBox.innerHTML = "Error: Please enter a Floodgate token above first.";
+                return;
+            }
+
+            const payload = {
+                model: DEFAULT_MODEL,
+                max_tokens: 1024,
+                messages: [
+                    { role: "user", content: "Hello! Please reply with a short confirmation message indicating that you received this request from the Hurray Relativity Custom Page browser bridge." }
+                ]
+            };
+
+            try {
+                const response = await fetch(FLOODGATE_URL, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${token}`
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    const errText = await response.text();
+                    respBox.style.color = "red";
+                    respBox.innerHTML = `<strong>Floodgate returned HTTP ${response.status}:</strong><br/>${escapeHtml(errText)}`;
+                    return;
+                }
+
+                const data = await response.json();
+                let output = "";
+                if (data.content && data.content.length > 0) {
+                    output = data.content[0].text;
+                } else {
+                    output = JSON.stringify(data, null, 2);
+                }
+
+                respBox.style.color = "#03543f";
+                respBox.innerHTML = `<strong>Floodgate Response (via Browser):</strong><br/>${escapeHtml(output)}`;
+            } catch (err) {
+                respBox.style.color = "red";
+                respBox.innerHTML = `<strong>Browser Request Failed:</strong> ${escapeHtml(err.message)}<br/><br/>
+                    <em>Ensure you are connected to Apple VPN and that floodgate.g.apple.com resolves on your Mac.</em>`;
+            }
+        }
+
+        function escapeHtml(string) {
+            return String(string)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+    </script>
+</body>
+</html>
+
+2. Default.aspx.cs (Clean Server Code Without Network Outbound Calls)
+
+Replace Default.aspx.cs with this:
+
 using Relativity.API;
 using Relativity.CustomPages;
 using Relativity.Services.Folder;
@@ -8,10 +271,6 @@ using Relativity.Services.Objects.DataContracts;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Net;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Text;
 using System.Threading.Tasks;
 using System.Web.UI;
 using System.Web.UI.WebControls;
@@ -22,13 +281,6 @@ namespace Hurray2
     {
         // Alternate way to get workspaceID
         private int WorkspaceArtifactId => ConnectionHelper.Helper().GetActiveCaseID();
-
-        // -------------------------------------------------------------
-        // FLOODGATE CONFIGURATION (Matching Hurray)
-        // -------------------------------------------------------------
-        private static readonly HttpClient _httpClient = new HttpClient();
-        private const string FloodgateEndpoint = "https://floodgate.g.apple.com/api/anthropic/v1/messages";
-        private const string DefaultModel = "anthropic.claude-sonnet-4-6";
 
         protected void Page_Load(object sender, EventArgs e)
         {
@@ -52,11 +304,6 @@ namespace Hurray2
                         DisplayLabel.Text = v;
                     }
 
-                    if (ViewState["FloodgateToken"] != null && lblTokenStatus != null)
-                    {
-                        lblTokenStatus.Text = "<span style='color:green;'>✓ Token active in ViewState</span>";
-                    }
-
                     RegisterAsyncTask(new PageAsyncTask(PopulateFolderDropdownAsync));
                     RegisterAsyncTask(new PageAsyncTask(PopulatePrivFieldsDropdownAsync));
                     RegisterAsyncTask(new PageAsyncTask(PopulateHurrayProjectsDropdownAsync));
@@ -71,151 +318,8 @@ namespace Hurray2
             }
         }
 
-        protected string CurrentFloodgateToken
-        {
-            get
-            {
-                if (txtFloodgateToken != null && !string.IsNullOrWhiteSpace(txtFloodgateToken.Text))
-                {
-                    return txtFloodgateToken.Text.Trim();
-                }
-                return ViewState["FloodgateToken"] as string;
-            }
-        }
-
-        // SAVE TOKEN BUTTON HANDLER
-        protected void btnSaveToken_Click(object sender, EventArgs e)
-        {
-            try
-            {
-                string token = txtFloodgateToken != null ? txtFloodgateToken.Text.Trim() : string.Empty;
-                if (!string.IsNullOrEmpty(token))
-                {
-                    ViewState["FloodgateToken"] = token;
-                    if (lblTokenStatus != null)
-                    {
-                        lblTokenStatus.Text = "<span style='color:green;'>✓ Token saved!</span>";
-                    }
-                }
-                else
-                {
-                    ViewState["FloodgateToken"] = null;
-                    if (lblTokenStatus != null)
-                    {
-                        lblTokenStatus.Text = "<span style='color:red;'>Token cannot be empty.</span>";
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                if (lblTokenStatus != null)
-                {
-                    lblTokenStatus.Text = $"<span style='color:red;'>Error saving token: {ex.Message}</span>";
-                }
-            }
-        }
-
         // -------------------------------------------------------------
-        // FLOODGATE API CALL
-        // -------------------------------------------------------------
-        protected void btnTestFloodgate_Click(object sender, EventArgs e)
-        {
-            RegisterAsyncTask(new PageAsyncTask(TestFloodgateConnectionAsync));
-        }
-
-        private async Task TestFloodgateConnectionAsync()
-        {
-            try
-            {
-                string token = CurrentFloodgateToken;
-                if (string.IsNullOrWhiteSpace(token))
-                {
-                    if (lblFloodgateResponse != null)
-                    {
-                        lblFloodgateResponse.Text = "<span style='color:red;'>Error: Please enter and save a Floodgate token first.</span>";
-                    }
-                    return;
-                }
-
-                if (lblFloodgateResponse != null)
-                {
-                    lblFloodgateResponse.Text = "Sending test request to Floodgate...";
-                }
-
-                string prompt = "Hello! Please reply with a short confirmation message indicating you are connected to the Hurray Relativity Custom Page.";
-                string responseText = await CallFloodgateAsync(prompt, token);
-
-                if (lblFloodgateResponse != null)
-                {
-                    lblFloodgateResponse.Text = $"<div style='background:#f0f7ff; border:1px solid #cce3f5; padding:10px; border-radius:4px;'><strong>Floodgate Response:</strong><br/>{Server.HtmlEncode(responseText).Replace("\n", "<br/>")}</div>";
-                }
-            }
-            catch (Exception ex)
-            {
-                // Unpack the real inner network exception
-                string fullError = ex.Message;
-                Exception inner = ex.InnerException;
-                while (inner != null)
-                {
-                    fullError += $" &rarr; {inner.Message}";
-                    inner = inner.InnerException;
-                }
-
-                if (lblFloodgateResponse != null)
-                {
-                    lblFloodgateResponse.Text = $"<span style='color:red;'>Floodgate Call Failed: {fullError}</span>";
-                }
-            }
-        }
-
-        public async Task<string> CallFloodgateAsync(string prompt, string bearerToken, string model = DefaultModel)
-        {
-            // Force modern TLS protocols (TLS 1.2 = 3072, TLS 1.3 = 12288)
-            ServicePointManager.SecurityProtocol |= 
-                SecurityProtocolType.Tls12 | 
-                (SecurityProtocolType)12288;
-
-            var requestBody = new
-            {
-                model = model,
-                max_tokens = 1024,
-                messages = new[]
-                {
-                    new { role = "user", content = prompt }
-                }
-            };
-
-            string jsonPayload = JsonConvert.SerializeObject(requestBody);
-
-            using (var request = new HttpRequestMessage(HttpMethod.Post, FloodgateEndpoint))
-            {
-                request.Content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
-                // Floodgate expects Bearer authorization with the OIDC token
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearerToken);
-
-                HttpResponseMessage response = await _httpClient.SendAsync(request);
-                string responseBody = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    throw new HttpRequestException($"HTTP {(int)response.StatusCode} ({response.ReasonPhrase}): {responseBody}");
-                }
-
-                // Parse Anthropic Messages API format: content[0].text
-                JObject json = JObject.Parse(responseBody);
-                var contentArray = json["content"] as JArray;
-                if (contentArray != null && contentArray.Count > 0)
-                {
-                    string text = (string)contentArray[0]["text"];
-                    return text ?? string.Empty;
-                }
-
-                return responseBody;
-            }
-        }
-
-        // -------------------------------------------------------------
-        // BUTTON CLICK HANDLER
+        // BUTTON CLICK HANDLER (RELATIVITY OBJECT MANAGER)
         // -------------------------------------------------------------
         protected void btnGetControlNumbers_Click(object sender, EventArgs e)
         {
