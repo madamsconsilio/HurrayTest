@@ -1,0 +1,448 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2870
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 .AppleSystemUIFontMonospaced-Regular;\f1\fnil\fcharset0 HelveticaNeue;\f2\fnil\fcharset0 .SFNS-Regular_wdth_opsz110000_GRAD_wght2580000;
+\f3\fnil\fcharset0 .SFNSMono-Light_YAXS144F07C_wght2580000;}
+{\colortbl;\red255\green255\blue255;\red87\green96\blue106;\red246\green246\blue246;\red0\green0\blue0;
+\red6\green33\blue79;\red194\green11\blue35;\red7\green68\blue184;\red91\green40\blue180;\red129\green40\blue2;
+\red27\green31\blue34;\red255\green255\blue255;\red109\green109\blue109;\red18\green82\blue31;}
+{\*\expandedcolortbl;;\cssrgb\c41569\c45098\c49020;\cssrgb\c97255\c97255\c97255;\cssrgb\c0\c0\c0\c84706;
+\cssrgb\c1176\c18431\c38431;\cssrgb\c81176\c13333\c18039;\cssrgb\c0\c36078\c77255;\cssrgb\c43529\c25882\c75686;\cssrgb\c58431\c21961\c0;
+\cssrgb\c14118\c16078\c18039;\cssrgb\c100000\c100000\c100000;\cssrgb\c50196\c50196\c50196;\cssrgb\c6667\c38824\c16078;}
+{\*\listtable{\list\listtemplateid1\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid1\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid1}}
+{\*\listoverridetable{\listoverride\listid1\listoverridecount0\ls1}}
+\margl1440\margr1440\vieww29700\viewh15420\viewkind0
+\deftab720
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs26 \cf2 \cb3 \expnd0\expndtw0\kerning0
+#!/usr/bin/env python3\cf4 \
+\cf5 """\
+Local proxy server for Relativity and Floodgate API.\
+Routes:\
+  - /proxy/*     -> https://apple-development.relativity.one/*\
+  - /floodgate/* -> https://floodgate.g.apple.com/api/anthropic/*\
+  - /token       -> runs appleconnect locally and returns a fresh Floodgate OIDC token!\
+Usage:\
+  python3 proxy.py\
+"""\cf4 \
+\
+\cf6 import\cf4  http.server\
+\cf6 import\cf4  json\
+\cf6 import\cf4  os\
+\cf6 import\cf4  subprocess\
+\cf6 import\cf4  urllib.request\
+\cf6 import\cf4  urllib.error\
+\
+RELATIVITY_TARGET = \cf5 "https://apple-development.relativity.one"\cf4 \
+FLOODGATE_TARGET  = \cf5 "https://floodgate.g.apple.com/api/anthropic"\cf4 \
+PORT = \cf7 8080\cf4 \
+\
+CLIENT_ID = \cf5 "hvys3fcwcteqrvw3qzkvtk86viuoqv"\cf4 \
+SCOPES    = \cf5 "openid,dsid,accountname,profile,groups"\cf4 \
+\
+\
+\cf6 def\cf4  \cf8 get_appleconnect_token\cf4 ():\
+    \cf5 """Generates a fresh Floodgate token using appleconnect on macOS."""\cf4 \
+    candidates = [\cf5 "/usr/local/bin/appleconnect"\cf4 , \cf5 "/opt/homebrew/bin/appleconnect"\cf4 ]\
+    ac_bin = \cf9 next\cf4 ((c \cf6 for\cf4  c \cf6 in\cf4  candidates \cf6 if\cf4  os.path.isfile(c)), \cf5 "appleconnect"\cf4 )\
+    \
+    cmd = [\
+        ac_bin, \cf5 "getToken"\cf4 ,\
+        \cf5 "-C"\cf4 , CLIENT_ID,\
+        \cf5 "--token-type=oauth"\cf4 ,\
+        \cf5 "--interactivity-type=gui"\cf4 ,\
+        \cf5 "-E"\cf4 , \cf5 "prod"\cf4 ,\
+        \cf5 "-G"\cf4 , \cf5 "pkce"\cf4 ,\
+        \cf5 "-o"\cf4 , SCOPES\
+    ]\
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=\cf7 True\cf4 )\
+    \cf6 if\cf4  res.returncode != \cf7 0\cf4 :\
+        \cf6 raise\cf4  RuntimeError(\cf5 f"appleconnect failed (\cf10 \{res.returncode\}\cf5 ): \cf10 \{res.stderr.strip() \cf6 or\cf10  res.stdout.strip()\}\cf5 "\cf4 )\
+    \
+    \cf2 # Parse id-token line\cf4 \
+    \cf6 for\cf4  line \cf6 in\cf4  res.stdout.splitlines():\
+        \cf6 if\cf4  line.startswith(\cf5 "oauth-id-token:"\cf4 ) \cf6 or\cf4  line.startswith(\cf5 "id-token:"\cf4 ):\
+            \cf6 return\cf4  line.split(\cf5 ":"\cf4 , \cf7 1\cf4 )[\cf7 1\cf4 ].strip()\
+            \
+    \cf6 raise\cf4  RuntimeError(\cf5 f"Could not find oauth-id-token in appleconnect output."\cf4 )\
+\
+\
+\cf6 class\cf4  \cf8 ProxyHandler\cf4 (http.server.BaseHTTPRequestHandler):\
+\
+    \cf6 def\cf4  \cf8 log_message\cf4 (self, \cf9 format\cf4 , *args):\
+        \cf9 print\cf4 (\cf5 f"  \cf10 \{self.command\}\cf5  \cf10 \{self.path\}\cf5  \uc0\u8594  \cf10 \{args[\cf7 1\cf10 ] \cf6 if\cf10  \cf9 len\cf10 (args) > \cf7 1\cf10  \cf6 else\cf10  \cf5 ''\cf10 \}\cf5 "\cf4 )\
+\
+    \cf6 def\cf4  \cf8 do_OPTIONS\cf4 (self):\
+        \cf2 # Handle CORS preflight cleanly for Safari\cf4 \
+        self.send_response(\cf7 200\cf4 )\
+        self.send_header(\cf5 "Access-Control-Allow-Origin"\cf4 , \cf5 "*"\cf4 )\
+        self.send_header(\cf5 "Access-Control-Allow-Methods"\cf4 , \cf5 "GET, POST, OPTIONS"\cf4 )\
+        self.send_header(\cf5 "Access-Control-Allow-Headers"\cf4 , \cf5 "Content-Type, Authorization, x-api-key"\cf4 )\
+        self.end_headers()\
+\
+    \cf6 def\cf4  \cf8 do_GET\cf4 (self):\
+        \cf6 if\cf4  self.path == \cf5 "/token"\cf4 :\
+            self._handle_token_request()\
+        \cf6 elif\cf4  self.path.startswith(\cf5 "/proxy/"\cf4 ):\
+            self._proxy(RELATIVITY_TARGET, self.path[\cf9 len\cf4 (\cf5 "/proxy"\cf4 ) - \cf7 1\cf4 :])\
+        \cf6 else\cf4 :\
+            self.send_error(\cf7 404\cf4 , \cf5 "Not Found"\cf4 )\
+\
+    \cf6 def\cf4  \cf8 do_POST\cf4 (self):\
+        \cf6 if\cf4  self.path.startswith(\cf5 "/floodgate/"\cf4 ):\
+            \cf2 # Maps /floodgate/v1/messages -> https://floodgate.g.apple.com/api/anthropic/v1/messages\cf4 \
+            remote_path = self.path[\cf9 len\cf4 (\cf5 "/floodgate"\cf4 ):]\
+            self._proxy(FLOODGATE_TARGET, remote_path)\
+        \cf6 elif\cf4  self.path.startswith(\cf5 "/proxy/"\cf4 ):\
+            self._proxy(RELATIVITY_TARGET, self.path[\cf9 len\cf4 (\cf5 "/proxy"\cf4 ) - \cf7 1\cf4 :])\
+        \cf6 else\cf4 :\
+            self.send_error(\cf7 404\cf4 , \cf5 "Not Found"\cf4 )\
+\
+    \cf6 def\cf4  \cf8 _handle_token_request\cf4 (self):\
+        \cf6 try\cf4 :\
+            token = get_appleconnect_token()\
+            body = json.dumps(\{\cf5 "token"\cf4 : token\}).encode(\cf5 "utf-8"\cf4 )\
+            self.send_response(\cf7 200\cf4 )\
+            self.send_header(\cf5 "Content-Type"\cf4 , \cf5 "application/json"\cf4 )\
+            self.send_header(\cf5 "Access-Control-Allow-Origin"\cf4 , \cf5 "*"\cf4 )\
+            self.end_headers()\
+            self.wfile.write(body)\
+        \cf6 except\cf4  Exception \cf6 as\cf4  e:\
+            err_body = json.dumps(\{\cf5 "error"\cf4 : \cf9 str\cf4 (e)\}).encode(\cf5 "utf-8"\cf4 )\
+            self.send_response(\cf7 500\cf4 )\
+            self.send_header(\cf5 "Content-Type"\cf4 , \cf5 "application/json"\cf4 )\
+            self.send_header(\cf5 "Access-Control-Allow-Origin"\cf4 , \cf5 "*"\cf4 )\
+            self.end_headers()\
+            self.wfile.write(err_body)\
+\
+    \cf6 def\cf4  \cf8 _proxy\cf4 (self, target_base, remote_path):\
+        url = target_base + remote_path\
+        content_length = \cf9 int\cf4 (self.headers.get(\cf5 "Content-Length"\cf4 , \cf7 0\cf4 ))\
+        body = self.rfile.read(content_length) \cf6 if\cf4  content_length > \cf7 0\cf4  \cf6 else\cf4  \cf7 None\cf4 \
+\
+        skip = \{\cf5 "host"\cf4 , \cf5 "connection"\cf4 , \cf5 "transfer-encoding"\cf4 , \cf5 "content-length"\cf4 \}\
+        headers = \{k: v \cf6 for\cf4  k, v \cf6 in\cf4  self.headers.items() \cf6 if\cf4  k.lower() \cf6 not\cf4  \cf6 in\cf4  skip\}\
+\
+        \cf6 try\cf4 :\
+            req = urllib.request.Request(url, data=body, headers=headers, method=self.command)\
+            \cf6 with\cf4  urllib.request.urlopen(req) \cf6 as\cf4  resp:\
+                resp_body = resp.read()\
+                self.send_response(resp.status)\
+                \cf6 for\cf4  key, value \cf6 in\cf4  resp.getheaders():\
+                    \cf6 if\cf4  key.lower() \cf6 in\cf4  (\cf5 "transfer-encoding"\cf4 , \cf5 "connection"\cf4 ):\
+                        \cf6 continue\cf4 \
+                    self.send_header(key, value)\
+                self.send_header(\cf5 "Access-Control-Allow-Origin"\cf4 , \cf5 "*"\cf4 )\
+                self.end_headers()\
+                self.wfile.write(resp_body)\
+        \cf6 except\cf4  urllib.error.HTTPError \cf6 as\cf4  e:\
+            resp_body = e.read()\
+            self.send_response(e.code)\
+            self.send_header(\cf5 "Content-Type"\cf4 , \cf5 "application/json"\cf4 )\
+            self.send_header(\cf5 "Access-Control-Allow-Origin"\cf4 , \cf5 "*"\cf4 )\
+            self.end_headers()\
+            self.wfile.write(resp_body)\
+        \cf6 except\cf4  Exception \cf6 as\cf4  e:\
+            err_msg = json.dumps(\{\cf5 "error"\cf4 : \cf9 str\cf4 (e)\}).encode(\cf5 "utf-8"\cf4 )\
+            self.send_response(\cf7 502\cf4 )\
+            self.send_header(\cf5 "Content-Type"\cf4 , \cf5 "application/json"\cf4 )\
+            self.send_header(\cf5 "Access-Control-Allow-Origin"\cf4 , \cf5 "*"\cf4 )\
+            self.end_headers()\
+            self.wfile.write(err_msg)\
+\
+\
+\cf6 if\cf4  __name__ == \cf5 "__main__"\cf4 :\
+    server = http.server.HTTPServer((\cf5 "127.0.0.1"\cf4 , PORT), ProxyHandler)\
+    \cf9 print\cf4 (\cf5 f"\uc0\u10003  Proxy running at http://localhost:\cf10 \{PORT\}\cf5 "\cf4 )\
+    \cf9 print\cf4 (\cf5 f"  \'95 /floodgate/* -> \cf10 \{FLOODGATE_TARGET\}\cf5 /*"\cf4 )\
+    \cf9 print\cf4 (\cf5 f"  \'95 /token       -> auto-generates AppleConnect token"\cf4 )\
+    \cf9 print\cf4 (\cf5 f"  \'95 /proxy/*     -> \cf10 \{RELATIVITY_TARGET\}\cf5 /*"\cf4 )\
+    \cf9 print\cf4 (\cf5 f"  Press Ctrl+C to stop\\n"\cf4 )\
+    \cf6 try\cf4 :\
+        server.serve_forever()\
+    \cf6 except\cf4  KeyboardInterrupt:\
+        \cf9 print\cf4 (\cf5 "\\nStopped."\cf4 )\
+\pard\pardeftab720\qc\partightenfactor0
+
+\f1\fs32 \cf4 \cb11 \
+\pard\pardeftab720\partightenfactor0
+
+\fs26 \cf12 \cb1 \
+\pard\pardeftab720\sa320\partightenfactor0
+
+\f2\b\fs32\fsmilli16250 \cf4 2. Updated 
+\f3 \cb3 Default.aspx
+\f2 \cb1  (Browser Bridge Using 
+\f1\b0 \cb3 proxy.py
+\f2\b \cb1 )\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f1\b0\fs26 \cf4 In 
+\f0\fs22\fsmilli11050 \cb3 Default.aspx
+\f1\fs26 \cb1 , the JavaScript is updated to talk to 
+\f0\fs22\fsmilli11050 \cb3 http://localhost:8080
+\f1\fs26 \cb1 :\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls1\ilvl0\cf4 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+Has an 
+\f2\b "Auto-Fetch Token from Proxy"
+\f1\b0  button that requests the token from your running python script.\
+\ls1\ilvl0\kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+Sends the Floodgate prompt to 
+\f0\fs22\fsmilli11050 \cb3 http://localhost:8080/floodgate/v1/messages
+\f1\fs26 \cb1 .\
+\pard\pardeftab720\partightenfactor0
+
+\f0 \cf4 \cb3 <%@ Page Language="C#" AutoEventWireup="true" CodeBehind="Default.aspx.cs" Inherits="Hurray2.Default" Async="true" %>\
+\
+\cf7 <!DOCTYPE \cf6 html\cf7 >\cf4 \
+<\cf13 html\cf4  \cf7 xmlns\cf4 =\cf5 "http://www.w3.org/1999/xhtml"\cf4 >\
+<\cf13 head\cf4  \cf7 runat\cf4 =\cf5 "server"\cf4 >\
+    <\cf13 title\cf4 >Hurray Privilege Review</\cf13 title\cf4 >\
+    <\cf13 style\cf4 >\
+        \cf13 body\cf4  \{\
+            \cf7 font-family\cf4 : -apple-system, BlinkMacSystemFont, \cf5 "Segoe UI"\cf4 , Roboto, Helvetica, Arial, sans-serif;\
+            \cf7 margin\cf4 : \cf7 24px\cf4 ;\
+            \cf7 background-color\cf4 : \cf7 #f7f9fa\cf4 ;\
+            \cf7 color\cf4 : \cf7 #333\cf4 ;\
+        \}\
+        \cf7 .container\cf4  \{\
+            \cf7 max-width\cf4 : \cf7 900px\cf4 ;\
+            \cf7 margin\cf4 : \cf7 0\cf4  auto;\
+            \cf7 background\cf4 : \cf7 #fff\cf4 ;\
+            \cf7 padding\cf4 : \cf7 24px\cf4 ;\
+            \cf7 border-radius\cf4 : \cf7 8px\cf4 ;\
+            \cf7 box-shadow\cf4 : \cf7 0\cf4  \cf7 2px\cf4  \cf7 6px\cf4  \cf9 rgba\cf4 (\cf7 0\cf4 ,\cf7 0\cf4 ,\cf7 0\cf4 ,\cf7 0.08\cf4 );\
+        \}\
+        \cf7 .section\cf4  \{\
+            \cf7 margin-bottom\cf4 : \cf7 24px\cf4 ;\
+            \cf7 padding-bottom\cf4 : \cf7 20px\cf4 ;\
+            \cf7 border-bottom\cf4 : \cf7 1px\cf4  solid \cf7 #e5e5e5\cf4 ;\
+        \}\
+        \cf7 .section-title\cf4  \{\
+            \cf7 font-size\cf4 : \cf7 16px\cf4 ;\
+            \cf7 font-weight\cf4 : \cf7 600\cf4 ;\
+            \cf7 margin-bottom\cf4 : \cf7 12px\cf4 ;\
+            \cf7 color\cf4 : \cf7 #111\cf4 ;\
+        \}\
+        \cf7 .form-group\cf4  \{\
+            \cf7 margin-bottom\cf4 : \cf7 14px\cf4 ;\
+        \}\
+        \cf13 label\cf4  \{\
+            \cf7 display\cf4 : block;\
+            \cf7 font-weight\cf4 : \cf7 500\cf4 ;\
+            \cf7 margin-bottom\cf4 : \cf7 6px\cf4 ;\
+            \cf7 font-size\cf4 : \cf7 13px\cf4 ;\
+        \}\
+        \cf7 .form-control\cf4  \{\
+            \cf7 width\cf4 : \cf7 100%\cf4 ;\
+            \cf7 padding\cf4 : \cf7 8px\cf4  \cf7 10px\cf4 ;\
+            \cf7 border\cf4 : \cf7 1px\cf4  solid \cf7 #ccc\cf4 ;\
+            \cf7 border-radius\cf4 : \cf7 4px\cf4 ;\
+            \cf7 box-sizing\cf4 : border-box;\
+            \cf7 font-size\cf4 : \cf7 13px\cf4 ;\
+        \}\
+        \cf7 .btn\cf4  \{\
+            \cf7 background-color\cf4 : \cf7 #0070c9\cf4 ;\
+            \cf7 color\cf4 : white;\
+            \cf7 border\cf4 : none;\
+            \cf7 padding\cf4 : \cf7 8px\cf4  \cf7 16px\cf4 ;\
+            \cf7 border-radius\cf4 : \cf7 4px\cf4 ;\
+            \cf7 cursor\cf4 : pointer;\
+            \cf7 font-size\cf4 : \cf7 13px\cf4 ;\
+            \cf7 font-weight\cf4 : \cf7 500\cf4 ;\
+        \}\
+        \cf7 .btn\cf13 :hover\cf4  \{\
+            \cf7 background-color\cf4 : \cf7 #005bb5\cf4 ;\
+        \}\
+        \cf7 .btn-secondary\cf4  \{\
+            \cf7 background-color\cf4 : \cf7 #4b5563\cf4 ;\
+        \}\
+        \cf7 .btn-secondary\cf13 :hover\cf4  \{\
+            \cf7 background-color\cf4 : \cf7 #374151\cf4 ;\
+        \}\
+        \cf7 .hint-text\cf4  \{\
+            \cf7 font-size\cf4 : \cf7 11px\cf4 ;\
+            \cf7 color\cf4 : \cf7 #777\cf4 ;\
+            \cf7 margin-top\cf4 : \cf7 4px\cf4 ;\
+            \cf7 line-height\cf4 : \cf7 1.4\cf4 ;\
+        \}\
+        \cf7 .response-box\cf4  \{\
+            \cf7 background\cf4 : \cf7 #f0f7ff\cf4 ;\
+            \cf7 border\cf4 : \cf7 1px\cf4  solid \cf7 #cce3f5\cf4 ;\
+            \cf7 padding\cf4 : \cf7 12px\cf4 ;\
+            \cf7 border-radius\cf4 : \cf7 4px\cf4 ;\
+            \cf7 margin-top\cf4 : \cf7 12px\cf4 ;\
+            \cf7 font-size\cf4 : \cf7 13px\cf4 ;\
+            \cf7 white-space\cf4 : pre-wrap;\
+            \cf7 word-break\cf4 : break-word;\
+        \}\
+    </\cf13 style\cf4 >\
+</\cf13 head\cf4 >\
+<\cf13 body\cf4 >\
+    <\cf13 form\cf4  \cf7 id\cf4 =\cf5 "form1"\cf4  \cf7 runat\cf4 =\cf5 "server"\cf4 >\
+        <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "container"\cf4 >\
+            <\cf13 h2\cf4 >Hurray Relativity Review</\cf13 h2\cf4 >\
+\
+            \cf2 <!-- User Info & Workspace -->\cf4 \
+            <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "section"\cf4 >\
+                <\cf13 asp:Label\cf4  \cf7 ID\cf4 =\cf5 "DisplayLabel"\cf4  \cf7 runat\cf4 =\cf5 "server"\cf4  \cf7 Font-Names\cf4 =\cf5 "Courier New"\cf4  \cf7 Font-Size\cf4 =\cf5 "Small"\cf4  />\
+            </\cf13 div\cf4 >\
+\
+            \cf2 <!-- Floodgate Proxy Section -->\cf4 \
+            <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "section"\cf4 >\
+                <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "section-title"\cf4 >Floodgate Authentication (via Local Proxy)</\cf13 div\cf4 >\
+                <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "form-group"\cf4 >\
+                    <\cf13 label\cf4  \cf7 for\cf4 =\cf5 "txtClientToken"\cf4 >Floodgate ID Token:</\cf13 label\cf4 >\
+                    <\cf13 input\cf4  \cf7 type\cf4 =\cf5 "password"\cf4  \cf7 id\cf4 =\cf5 "txtClientToken"\cf4  \cf7 class\cf4 =\cf5 "form-control"\cf4  \cf7 placeholder\cf4 =\cf5 "Token will load automatically or paste here..."\cf4  />\
+                    <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "hint-text"\cf4 >\
+                        Make sure <\cf13 code\cf4 >python3 proxy.py</\cf13 code\cf4 > is running in Terminal on your Mac.\
+                    </\cf13 div\cf4 >\
+                </\cf13 div\cf4 >\
+                <\cf13 button\cf4  \cf7 type\cf4 =\cf5 "button"\cf4  \cf7 class\cf4 =\cf5 "btn"\cf4  \cf7 onclick\cf4 =\cf5 "fetchTokenFromProxy()"\cf4 >Auto-Fetch Token via proxy.py</\cf13 button\cf4 >\
+                <\cf13 button\cf4  \cf7 type\cf4 =\cf5 "button"\cf4  \cf7 class\cf4 =\cf5 "btn btn-secondary"\cf4  \cf7 onclick\cf4 =\cf5 "toggleTokenVisibility()"\cf4 >Show/Hide Token</\cf13 button\cf4 >\
+                <\cf13 span\cf4  \cf7 id\cf4 =\cf5 "clientTokenStatus"\cf4  \cf7 style\cf4 =\cf5 "margin-left: 10px; font-size: 12px;"\cf4 ></\cf13 span\cf4 >\
+            </\cf13 div\cf4 >\
+\
+            \cf2 <!-- Floodgate Connection Test -->\cf4 \
+            <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "section"\cf4 >\
+                <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "section-title"\cf4 >Floodgate Test</\cf13 div\cf4 >\
+                <\cf13 button\cf4  \cf7 type\cf4 =\cf5 "button"\cf4  \cf7 class\cf4 =\cf5 "btn"\cf4  \cf7 onclick\cf4 =\cf5 "testFloodgateViaProxy()"\cf4 >Test Floodgate Connection</\cf13 button\cf4 >\
+                <\cf13 div\cf4  \cf7 id\cf4 =\cf5 "floodgateDirectResponse"\cf4  \cf7 style\cf4 =\cf5 "display:none;"\cf4  \cf7 class\cf4 =\cf5 "response-box"\cf4 ></\cf13 div\cf4 >\
+            </\cf13 div\cf4 >\
+\
+            \cf2 <!-- Project & Review Dropdowns -->\cf4 \
+            <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "section"\cf4 >\
+                <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "section-title"\cf4 >Project & Review Settings</\cf13 div\cf4 >\
+\
+                <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "form-group"\cf4 >\
+                    <\cf13 label\cf4 >Hurray Project:</\cf13 label\cf4 >\
+                    <\cf13 asp:DropDownList\cf4  \cf7 ID\cf4 =\cf5 "ddlHurrayProjects"\cf4  \cf7 runat\cf4 =\cf5 "server"\cf4  \cf7 CssClass\cf4 =\cf5 "form-control"\cf4  />\
+                </\cf13 div\cf4 >\
+\
+                <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "form-group"\cf4 >\
+                    <\cf13 label\cf4 >Folder Tree:</\cf13 label\cf4 >\
+                    <\cf13 asp:DropDownList\cf4  \cf7 ID\cf4 =\cf5 "ddlDynamicOptions"\cf4  \cf7 runat\cf4 =\cf5 "server"\cf4  \cf7 CssClass\cf4 =\cf5 "form-control"\cf4  />\
+                </\cf13 div\cf4 >\
+\
+                <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "form-group"\cf4 >\
+                    <\cf13 label\cf4 >Privilege Field:</\cf13 label\cf4 >\
+                    <\cf13 asp:DropDownList\cf4  \cf7 ID\cf4 =\cf5 "ddlFields"\cf4  \cf7 runat\cf4 =\cf5 "server"\cf4  \cf7 CssClass\cf4 =\cf5 "form-control"\cf4  />\
+                </\cf13 div\cf4 >\
+            </\cf13 div\cf4 >\
+\
+            \cf2 <!-- Documents Section -->\cf4 \
+            <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "section"\cf4 >\
+                <\cf13 div\cf4  \cf7 class\cf4 =\cf5 "section-title"\cf4 >Documents</\cf13 div\cf4 >\
+                <\cf13 asp:Button\cf4  \cf7 ID\cf4 =\cf5 "btnGetControlNumbers"\cf4  \cf7 runat\cf4 =\cf5 "server"\cf4  \cf7 Text\cf4 =\cf5 "Get Top 10 Control Numbers"\cf4  \cf7 CssClass\cf4 =\cf5 "btn"\cf4  \cf7 OnClick\cf4 =\cf5 "btnGetControlNumbers_Click"\cf4  />\
+                <\cf13 div\cf4  \cf7 style\cf4 =\cf5 "margin-top: 12px;"\cf4 >\
+                    <\cf13 asp:Label\cf4  \cf7 ID\cf4 =\cf5 "lblControlNumbers"\cf4  \cf7 runat\cf4 =\cf5 "server"\cf4  />\
+                </\cf13 div\cf4 >\
+            </\cf13 div\cf4 >\
+        </\cf13 div\cf4 >\
+    </\cf13 form\cf4 >\
+\
+    <\cf13 script\cf4  \cf7 type\cf4 =\cf5 "text/javascript"\cf4 >\
+        \cf6 const\cf4  \cf7 PROXY_URL\cf4  = \cf5 "http://localhost:8080"\cf4 ;\
+        \cf6 const\cf4  \cf7 FLOODGATE_PROXY_ENDPOINT\cf4  = \cf5 `\cf10 $\{PROXY_URL\}\cf5 /floodgate/v1/messages`\cf4 ;\
+        \cf6 const\cf4  \cf7 DEFAULT_MODEL\cf4  = \cf5 "anthropic.claude-sonnet-4-6"\cf4 ;\
+\
+        \cf6 window\cf4 .\cf8 addEventListener\cf4 (\cf5 "DOMContentLoaded"\cf4 , () => \{\
+            \cf6 const\cf4  saved = sessionStorage.\cf8 getItem\cf4 (\cf5 "FloodgateIdToken"\cf4 );\
+            \cf6 if\cf4  (saved) \{\
+                \cf6 document\cf4 .\cf8 getElementById\cf4 (\cf5 "txtClientToken"\cf4 ).value = saved;\
+                \cf6 document\cf4 .\cf8 getElementById\cf4 (\cf5 "clientTokenStatus"\cf4 ).innerHTML = \cf5 "<span style='color:green;'>\uc0\u10003  Token active in session</span>"\cf4 ;\
+            \}\
+        \});\
+\
+        \cf6 async\cf4  \cf6 function\cf4  \cf8 fetchTokenFromProxy\cf4 () \{\
+            \cf6 const\cf4  status = \cf6 document\cf4 .\cf8 getElementById\cf4 (\cf5 "clientTokenStatus"\cf4 );\
+            status.innerHTML = \cf5 "Requesting token via appleconnect on your Mac..."\cf4 ;\
+\
+            \cf6 try\cf4  \{\
+                \cf6 const\cf4  res = \cf6 await\cf4  \cf8 fetch\cf4 (\cf5 `\cf10 $\{PROXY_URL\}\cf5 /token`\cf4 );\
+                \cf6 const\cf4  data = \cf6 await\cf4  res.\cf8 json\cf4 ();\
+\
+                \cf6 if\cf4  (data.token) \{\
+                    \cf6 document\cf4 .\cf8 getElementById\cf4 (\cf5 "txtClientToken"\cf4 ).value = data.token;\
+                    sessionStorage.\cf8 setItem\cf4 (\cf5 "FloodgateIdToken"\cf4 , data.token);\
+                    status.innerHTML = \cf5 "<span style='color:green;'>\uc0\u10003  Token acquired via appleconnect!</span>"\cf4 ;\
+                \} \cf6 else\cf4  \{\
+                    status.innerHTML = \cf5 `<span style='color:red;'>Failed: \cf10 $\{data.error || \cf5 'Unknown error'\cf10 \}\cf5 </span>`\cf4 ;\
+                \}\
+            \} \cf6 catch\cf4  (err) \{\
+                status.innerHTML = \cf5 `<span style='color:red;'>Could not connect to proxy. Is <code>python3 proxy.py</code> running on port 8080?</span>`\cf4 ;\
+            \}\
+        \}\
+\
+        \cf6 function\cf4  \cf8 toggleTokenVisibility\cf4 () \{\
+            \cf6 const\cf4  input = \cf6 document\cf4 .\cf8 getElementById\cf4 (\cf5 "txtClientToken"\cf4 );\
+            input.type = input.type === \cf5 "password"\cf4  ? \cf5 "text"\cf4  : \cf5 "password"\cf4 ;\
+        \}\
+\
+        \cf6 async\cf4  \cf6 function\cf4  \cf8 testFloodgateViaProxy\cf4 () \{\
+            \cf6 const\cf4  respBox = \cf6 document\cf4 .\cf8 getElementById\cf4 (\cf5 "floodgateDirectResponse"\cf4 );\
+            respBox.style.display = \cf5 "block"\cf4 ;\
+            respBox.style.color = \cf5 "#333"\cf4 ;\
+            respBox.innerHTML = \cf5 "Sending request through local proxy.py..."\cf4 ;\
+\
+            \cf6 const\cf4  token = \cf6 document\cf4 .\cf8 getElementById\cf4 (\cf5 "txtClientToken"\cf4 ).value.\cf8 trim\cf4 () || sessionStorage.\cf8 getItem\cf4 (\cf5 "FloodgateIdToken"\cf4 );\
+\
+            \cf6 if\cf4  (!token) \{\
+                respBox.style.color = \cf5 "red"\cf4 ;\
+                respBox.innerHTML = \cf5 "Error: Please click 'Auto-Fetch Token' or enter a Floodgate token above first."\cf4 ;\
+                \cf6 return\cf4 ;\
+            \}\
+\
+            \cf6 const\cf4  payload = \{\
+                \cf7 model\cf4 : \cf7 DEFAULT_MODEL\cf4 ,\
+                \cf7 max_tokens\cf4 : \cf7 1024\cf4 ,\
+                \cf7 messages\cf4 : [\
+                    \{ \cf7 role\cf4 : \cf5 "user"\cf4 , \cf7 content\cf4 : \cf5 "Hello! Please reply with a short confirmation message indicating that you received this request through proxy.py."\cf4  \}\
+                ]\
+            \};\
+\
+            \cf6 try\cf4  \{\
+                \cf6 const\cf4  response = \cf6 await\cf4  \cf8 fetch\cf4 (\cf7 FLOODGATE_PROXY_ENDPOINT\cf4 , \{\
+                    \cf7 method\cf4 : \cf5 "POST"\cf4 ,\
+                    \cf7 headers\cf4 : \{\
+                        \cf5 "Content-Type"\cf4 : \cf5 "application/json"\cf4 ,\
+                        \cf5 "Authorization"\cf4 : \cf5 `Bearer \cf10 $\{token\}\cf5 `\cf4 \
+                    \},\
+                    \cf7 body\cf4 : \cf8 JSON\cf4 .\cf8 stringify\cf4 (payload)\
+                \});\
+\
+                \cf6 if\cf4  (!response.ok) \{\
+                    \cf6 const\cf4  errText = \cf6 await\cf4  response.\cf8 text\cf4 ();\
+                    respBox.style.color = \cf5 "red"\cf4 ;\
+                    respBox.innerHTML = \cf5 `<strong>Floodgate Error (HTTP \cf10 $\{response.status\}\cf5 ):</strong><br/>\cf10 $\{escapeHtml(errText)\}\cf5 `\cf4 ;\
+                    \cf6 return\cf4 ;\
+                \}\
+\
+                \cf6 const\cf4  data = \cf6 await\cf4  response.\cf8 json\cf4 ();\
+                \cf6 let\cf4  output = \cf5 ""\cf4 ;\
+                \cf6 if\cf4  (data.content && data.content.length > \cf7 0\cf4 ) \{\
+                    output = data.content[\cf7 0\cf4 ].text;\
+                \} \cf6 else\cf4  \{\
+                    output = \cf8 JSON\cf4 .\cf8 stringify\cf4 (data, \cf7 null\cf4 , \cf7 2\cf4 );\
+                \}\
+\
+                respBox.style.color = \cf5 "#03543f"\cf4 ;\
+                respBox.innerHTML = \cf5 `<strong>Floodgate Response:</strong><br/>\cf10 $\{escapeHtml(output)\}\cf5 `\cf4 ;\
+            \} \cf6 catch\cf4  (err) \{\
+                respBox.style.color = \cf5 "red"\cf4 ;\
+                respBox.innerHTML = \cf5 `<strong>Proxy Request Failed:</strong> \cf10 $\{escapeHtml(err.message)\}\cf5 <br/><br/>\
+                    <em>Ensure <code>python3 proxy.py</code> is running in Terminal and your Mac is connected to Apple VPN.</em>`\cf4 ;\
+            \}\
+        \}\
+\
+        \cf6 function\cf4  \cf8 escapeHtml\cf4 (string) \{\
+            \cf6 return\cf4  \cf8 String\cf4 (string)\
+                .\cf8 replace\cf4 (\cf5 /&/g\cf4 , \cf5 "&amp;"\cf4 )\
+                .\cf8 replace\cf4 (\cf5 /</g\cf4 , \cf5 "&lt;"\cf4 )\
+                .\cf8 replace\cf4 (\cf5 />/g\cf4 , \cf5 "&gt;"\cf4 )\
+                .\cf8 replace\cf4 (\cf5 /"/g\cf4 , \cf5 "&quot;"\cf4 )\
+                .\cf8 replace\cf4 (\cf5 /'/g\cf4 , \cf5 "&#039;"\cf4 );\
+        \}\
+    </\cf13 script\cf4 >\
+</\cf13 body\cf4 >\
+</\cf13 html\cf4 >}
